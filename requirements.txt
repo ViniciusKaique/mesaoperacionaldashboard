@@ -1,0 +1,6 @@
+streamlit
+streamlit-authenticator
+pandas
+plotly
+Pillow
+psycopg2-binary
