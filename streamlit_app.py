@@ -1,151 +1,216 @@
 import streamlit as st
+import streamlit_authenticator as stauth
 import pandas as pd
-import math
-from pathlib import Path
+import plotly.express as px
+from PIL import Image
+import psycopg2
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
+
+# --- CSS PERSONALIZADO ---
+st.markdown("""
+<style>
+    .block-container { padding-top: 1rem; }
+    .stButton button { background-color: #ff4b4b; color: white; border-radius: 8px; }
+    [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
+    .dataframe { font-size: 14px !important; }
+    th, td { text-align: center !important; }
+    .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
+        justify-content: center !important;
+        text-align: center !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- FUNÇÃO PARA CARREGAR LOGO ---
+def carregar_logo():
+    try:
+        return Image.open("logo.png")
+    except:
+        return None
+
+# --- CONFIGURAÇÃO DE AUTENTICAÇÃO ---
+auth_config = st.secrets["auth"]
+
+config = {
+    'credentials': {
+        'usernames': {
+            auth_config["username"]: {
+                'name': auth_config["name"],
+                'password': auth_config["password_hash"],
+                'email': auth_config["email"]
+            }
+        }
+    },
+    'cookie': {
+        'name': auth_config["cookie_name"],
+        'key': auth_config["cookie_key"],
+        'expiry_days': auth_config["cookie_expiry_days"]
+    }
+}
+
+authenticator = stauth.Authenticate(
+    config['credentials'],
+    config['cookie']['name'],
+    config['cookie']['key'],
+    config['cookie']['expiry_days']
 )
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# --- TELA DE LOGIN ---
+if st.session_state.get("authentication_status") is None or st.session_state.get("authentication_status") is False:
+    col_esq, col_centro, col_dir = st.columns([1, 1.5, 1])
+    with col_centro:
+        logo = carregar_logo()
+        if logo:
+            c1, c2, c3 = st.columns([1,2,1])
+            with c2:
+                st.image(logo, use_container_width=True)
+        try:
+            authenticator.login(location='main')
+        except:
+            authenticator.login()
+    
+    if st.session_state.get("authentication_status") is False:
+        with col_centro:
+            st.error('Usuário ou senha incorretos')
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+# --- SISTEMA PRINCIPAL (PÓS-LOGIN) ---
+if st.session_state.get("authentication_status") is True:
+    name = st.session_state.get("name")
+    
+    # --- SIDEBAR ---
+    with st.sidebar:
+        logo = carregar_logo()
+        if logo:
+            st.image(logo, use_container_width=True)
+            st.divider()
+        st.write(f"👤 **{name}**")
+        authenticator.logout(location='sidebar')
+        st.divider()
+        st.info("Painel Gerencial + Detalhe")
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+    # --- CONEXÃO COM POSTGRES / SUPABASE ---
+    db = st.secrets["postgres"]
+    conn = psycopg2.connect(
+        host=db["host"],
+        port=db["port"],
+        dbname=db["dbname"],
+        user=db["user"],
+        password=db["password"],
+        sslmode=db["sslmode"]
     )
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    # --- CONSULTAS ---
+    query_resumo = """
+        SELECT 
+            t.NomeTipo AS Tipo,
+            u.NomeUnidade AS Escola,
+            s.NomeSupervisor AS Supervisor, 
+            c.NomeCargo AS Cargo,
+            q.Quantidade AS Edital,
+            (SELECT COUNT(*) FROM Colaboradores col WHERE col.UnidadeID = u.UnidadeID AND col.CargoID = c.CargoID AND col.Ativo = 1) AS Real,
+            ((SELECT COUNT(*) FROM Colaboradores col WHERE col.UnidadeID = u.UnidadeID AND col.CargoID = c.CargoID AND col.Ativo = 1) - q.Quantidade) AS Diferenca,
+            CASE 
+                WHEN ((SELECT COUNT(*) FROM Colaboradores col WHERE col.UnidadeID = u.UnidadeID AND col.CargoID = c.CargoID AND col.Ativo = 1) - q.Quantidade) < 0 THEN 'FALTA'
+                WHEN ((SELECT COUNT(*) FROM Colaboradores col WHERE col.UnidadeID = u.UnidadeID AND col.CargoID = c.CargoID AND col.Ativo = 1) - q.Quantidade) > 0 THEN 'EXCEDENTE'
+                ELSE 'OK'
+            END AS Status
+        FROM QuadroEdital q
+        JOIN Unidades u ON q.UnidadeID = u.UnidadeID
+        JOIN Cargos c ON q.CargoID = c.CargoID
+        JOIN TiposUnidades t ON u.TipoID = t.TipoID
+        JOIN Supervisores s ON u.SupervisorID = s.SupervisorID
+        ORDER BY u.NomeUnidade, c.NomeCargo;
+    """
 
-    return gdp_df
+    query_funcionarios = """
+        SELECT 
+            u.NomeUnidade AS Escola,
+            c.NomeCargo AS Cargo,
+            col.Nome AS Funcionario,
+            col.ColaboradorID AS ID
+        FROM Colaboradores col
+        JOIN Unidades u ON col.UnidadeID = u.UnidadeID
+        JOIN Cargos c ON col.CargoID = c.CargoID
+        WHERE col.Ativo = 1
+        ORDER BY u.NomeUnidade, c.NomeCargo, col.Nome;
+    """
 
-gdp_df = get_gdp_data()
+    df_resumo = pd.read_sql(query_resumo, conn)
+    df_pessoas = pd.read_sql(query_funcionarios, conn)
+    conn.close()
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+    # --- PRÉ-PROCESSAMENTO ---
+    df_resumo['Diferenca_num'] = pd.to_numeric(df_resumo.get('Diferenca', 0), errors='coerce').fillna(0).astype(int)
+    df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+    def status_with_emoji(s):
+        if s == 'FALTA': return '🔴 FALTA'
+        elif s == 'EXCEDENTE': return '🔵 EXCEDENTE'
+        elif s == 'OK': return '🟢 OK'
+        return s
+    
+    df_resumo['Status_display'] = df_resumo['Status'].apply(status_with_emoji)
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
+    # --- DASHBOARD ---
+    st.title("📊 Mesa Operacional")
+    total_edital = df_resumo['Edital'].sum()
+    total_real = df_resumo['Real'].sum()
+    saldo_geral = int(total_real - total_edital)
 
-# Add some spacing
-''
-''
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("📋 Total Edital", total_edital)
+    col_m2.metric("👥 Efetivo Atual", total_real)
+    col_m3.metric("⚖️ Saldo Geral", saldo_geral, delta_color="normal")
 
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
+    st.markdown("---")
 
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
+    # --- FILTROS POR ESCOLA, CARGO E FUNCIONÁRIO ---
+    st.subheader("🔍 Filtros")
+    escolas = ["Todas"] + sorted(df_resumo['Escola'].unique().tolist())
+    cargos = ["Todos"] + sorted(df_resumo['Cargo'].unique().tolist())
+    funcionarios = ["Todos"] + sorted(df_pessoas['Funcionario'].unique().tolist())
 
-countries = gdp_df['Country Code'].unique()
+    escola_selec = st.selectbox("Escola", escolas)
+    cargo_selec = st.selectbox("Cargo", cargos)
+    funcionario_selec = st.selectbox("Funcionário", funcionarios)
 
-if not len(countries):
-    st.warning("Select at least one country")
+    df_filtrado = df_resumo.copy()
 
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
+    if escola_selec != "Todas":
+        df_filtrado = df_filtrado[df_filtrado['Escola'] == escola_selec]
+    if cargo_selec != "Todos":
+        df_filtrado = df_filtrado[df_filtrado['Cargo'] == cargo_selec]
 
-''
-''
-''
+    st.markdown("---")
+    st.subheader("📈 Gráficos e Resumo Filtrado")
+    
+    df_por_cargo = df_filtrado.groupby('Cargo')[['Edital','Real']].sum().reset_index()
+    df_por_cargo['Diferenca_num'] = df_por_cargo['Real'] - df_por_cargo['Edital']
+    df_por_cargo['Diferenca_display'] = df_por_cargo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(x))
+    
+    col_g1, col_g2 = st.columns([2,1])
+    with col_g1:
+        df_grafico = df_por_cargo.melt(id_vars=['Cargo'], value_vars=['Edital','Real'], var_name='Tipo', value_name='Quantidade')
+        fig = px.bar(df_grafico, x='Cargo', y='Quantidade', color='Tipo', barmode='group',
+                     color_discrete_map={'Edital': '#808080','Real': '#00bfff'}, text_auto=True, template="seaborn")
+        st.plotly_chart(fig, use_container_width=True)
 
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
+    with col_g2:
+        display_df_geral = df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'})
+        display_df_geral['Edital'] = display_df_geral['Edital'].astype(str)
+        display_df_geral['Real'] = display_df_geral['Real'].astype(str)
+        st.dataframe(display_df_geral, use_container_width=True, hide_index=True)
 
-st.header('GDP over time', divider='gray')
+    st.markdown("---")
+    st.subheader("🏫 Detalhe por Escola / Cargo / Funcionário")
+    df_detalhe = df_pessoas.copy()
+    if escola_selec != "Todas":
+        df_detalhe = df_detalhe[df_detalhe['Escola'] == escola_selec]
+    if cargo_selec != "Todos":
+        df_detalhe = df_detalhe[df_detalhe['Cargo'] == cargo_selec]
+    if funcionario_selec != "Todos":
+        df_detalhe = df_detalhe[df_detalhe['Funcionario'] == funcionario_selec]
 
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+    st.dataframe(df_detalhe[['Escola','Cargo','Funcionario','ID']], use_container_width=True, hide_index=True)
