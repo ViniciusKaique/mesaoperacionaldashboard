@@ -1,95 +1,87 @@
-# streamlit_app.py
 import streamlit as st
 import streamlit_authenticator as stauth
 import psycopg2
 import pandas as pd
+from psycopg2.extras import RealDictCursor
+import yaml
 
-# -----------------------------
-# CONFIGURAÇÕES DE AUTENTICAÇÃO
-# -----------------------------
-auth_config = {
-    'credentials': {
-        'usernames': {
-            st.secrets["auth"]["username"]: {
-                'name': st.secrets["auth"]["name"],
-                'password': st.secrets["auth"]["password_hash"],
-                'email': st.secrets["auth"]["email"]
+# --- CONFIGURAÇÕES ---
+st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
+
+# --- CARREGAR SECRETS ---
+secrets = st.secrets
+
+# Autenticação
+config = {
+    "credentials": {
+        "usernames": {
+            secrets["auth"]["username"]: {
+                "name": secrets["auth"]["name"],
+                "password": secrets["auth"]["password_hash"],
+                "email": secrets["auth"]["email"]
             }
         }
     },
-    'cookie': {
-        'name': st.secrets["auth"]["cookie_name"],
-        'key': st.secrets["auth"]["cookie_key"],
-        'expiry_days': st.secrets["auth"]["cookie_expiry_days"]
+    "cookie": {
+        "name": secrets["auth"]["cookie_name"],
+        "key": secrets["auth"]["cookie_key"],
+        "expiry_days": secrets["auth"]["cookie_expiry_days"]
     }
 }
 
 authenticator = stauth.Authenticate(
-    credentials=auth_config['credentials'],
-    cookie_name=auth_config['cookie']['name'],
-    key=auth_config['cookie']['key'],
-    cookie_expiry_days=auth_config['cookie']['expiry_days'],
+    credentials=config["credentials"],
+    cookie_name=config["cookie"]["name"],
+    key=config["cookie"]["key"],
+    cookie_expiry_days=config["cookie"]["expiry_days"]
 )
 
-name, authentication_status, username = authenticator.login("Login", "main")
+# --- LOGIN ---
+name, authentication_status, username = authenticator.login("Login", location="main")
 
-if authentication_status:
-    st.sidebar.success(f"Logado como {name}")
-elif authentication_status is False:
+if authentication_status is False:
     st.error("Usuário ou senha incorretos")
+    st.stop()
 elif authentication_status is None:
-    st.warning("Por favor insira suas credenciais")
+    st.warning("Por favor insira seu usuário e senha")
+    st.stop()
+elif authentication_status:
+    authenticator.logout("Logout", location="sidebar")
+    st.sidebar.write(f"👤 {name}")
 
-# -----------------------------
-# FUNÇÃO DE CONEXÃO COM POSTGRES
-# -----------------------------
+# --- CONEXÃO COM POSTGRES ---
+@st.cache_data(ttl=3600)
 def get_connection():
-    db_conf = {
-        "host": st.secrets["postgres"]["host"],
-        "port": st.secrets["postgres"]["port"],
-        "user": st.secrets["postgres"]["user"],
-        "password": st.secrets["postgres"]["password"],
-        "dbname": st.secrets["postgres"]["dbname"],
-        "sslmode": st.secrets["postgres"].get("sslmode", "require"),
-    }
-    return psycopg2.connect(**db_conf)
-
-# -----------------------------
-# FUNÇÕES DO APP
-# -----------------------------
-if authentication_status:
-    st.title("📊 Mesa Operacional")
-
+    db_conf = secrets["postgres"]
     try:
-        conn = get_connection()
-        st.success("Conectado ao banco de dados com sucesso!")
+        conn = psycopg2.connect(
+            host=db_conf["host"],
+            port=db_conf.get("port", 5432),
+            dbname=db_conf["dbname"],
+            user=db_conf["user"],
+            password=db_conf["password"],
+            sslmode=db_conf.get("sslmode", "require"),
+            cursor_factory=RealDictCursor
+        )
+        return conn
     except Exception as e:
-        st.error(f"Erro ao conectar ao banco: {e}")
-        st.stop()
+        st.error(f"Erro ao conectar: {e}")
+        return None
 
-    # Exemplo: listar tabelas
-    st.subheader("Tabelas disponíveis")
-    try:
-        query = """
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema='public'
-        ORDER BY table_name;
-        """
-        df_tables = pd.read_sql(query, conn)
-        st.dataframe(df_tables)
-    except Exception as e:
-        st.error(f"Erro ao buscar tabelas: {e}")
+conn = get_connection()
+if conn is None:
+    st.stop()
 
-    # Exemplo: visualizar dados de uma tabela
-    st.subheader("Visualizar dados da tabela Unidades")
-    try:
-        query = "SELECT * FROM \"Unidades\" LIMIT 50;"
-        df_unidades = pd.read_sql(query, conn)
-        st.dataframe(df_unidades)
-    except Exception as e:
-        st.error(f"Erro ao buscar dados da tabela Unidades: {e}")
+# --- FUNÇÕES AUXILIARES ---
+def load_table(table_name):
+    query = f'SELECT * FROM "{table_name}" LIMIT 100;'
+    df = pd.read_sql(query, conn)
+    return df
 
-    conn.close()
+# --- DASHBOARD ---
+st.title("Mesa Operacional")
 
-    authenticator.logout("Logout", "sidebar")
+# Exemplo: seleção de tabela
+tabela_selecionada = st.selectbox("Escolha a tabela", ["Cargos", "Colaboradores", "QuadroEdital", "Supervisores", "TiposUnidades", "Unidades"])
+df = load_table(tabela_selecionada)
+st.dataframe(df)
