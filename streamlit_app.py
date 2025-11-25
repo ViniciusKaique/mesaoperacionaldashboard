@@ -58,7 +58,7 @@ authenticator = stauth.Authenticate(
 if not st.session_state.get("authentication_status"):
     col_esq, col_centro, col_dir = st.columns([1, 1.5, 1])
     with col_centro:
-        if logo := carregar_logo(): st.image(logo, use_container_width=True)
+        # LOGO REMOVIDO DAQUI CONFORME SOLICITADO
         try: authenticator.login(location='main')
         except: authenticator.login()
     
@@ -269,4 +269,4 @@ if st.session_state.get("authentication_status"):
                     st.warning("Nenhum colaborador encontrado.")
 
     except Exception as e:
-        st.error(f"Erro no banco de dados: {e}")
+        st.error(f"Erro de conexão ou dados: {e}")
