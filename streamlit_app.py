@@ -22,26 +22,33 @@ st.markdown("""
         text-align: center !important;
     }
 
-    /* --- ESTILO DA MENSAGEM DE CARREGAMENTO (SPINNER MAIOR) --- */
+    /* --- ESTILO DA MENSAGEM DE CARREGAMENTO --- */
     div[data-testid="stSpinner"] > div {
-        font-size: 24px !important;   /* Letra Grande */
-        font-weight: bold !important; /* Negrito */
-        color: #ff4b4b !important;    /* Cor Vermelha do Tema */
+        font-size: 24px !important;
+        font-weight: bold !important;
+        color: #ff4b4b !important;
         display: flex;
         justify-content: center;
         align-items: center;
         gap: 10px;
     }
 
-    /* --- CENTRALIZAR LOGO E IMAGENS --- */
+    /* --- FORÇAR CENTRALIZAÇÃO DA IMAGEM (LOGO) --- */
+    div[data-testid="stImage"] > img {
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        width: 100%;
+    }
     div[data-testid="stImage"] {
-        display: flex;
         justify-content: center;
     }
-    
-    /* Centralizar botão de login */
+
+    /* --- CENTRALIZAR BOTÃO DE LOGIN --- */
     div.stButton > button {
         width: 100%;
+        display: block;
+        margin: 0 auto;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -85,21 +92,33 @@ authenticator = stauth.Authenticate(
 
 # --- LOGIN ---
 if not st.session_state.get("authentication_status"):
-    # Espaçamento para centralizar verticalmente
-    st.markdown("<br><br><br>", unsafe_allow_html=True)
     
-    col_esq, col_centro, col_dir = st.columns([1, 1.5, 1])
+    # 1. Espaço vazio para empurrar para o meio verticalmente
+    st.write("")
+    st.write("")
+    st.write("")
+    st.write("")
+    st.write("")
+
+    # 2. Colunas para Centralização Horizontal [Lateral, Meio, Lateral]
+    # Usando [3, 2, 3] deixamos a coluna do meio mais estreita e focada
+    col_esq, col_centro, col_dir = st.columns([3, 2, 3])
+    
     with col_centro:
         logo = carregar_logo()
         if logo: 
-            # Logo menor (250px) e centralizado pelo CSS acima
-            st.image(logo, width=250) 
+            # Sem definir width fixo aqui, deixamos o CSS e a coluna controlarem
+            st.image(logo, use_container_width=True) 
         
-        try: authenticator.login(location='main')
-        except: authenticator.login()
+        try: 
+            authenticator.login(location='main')
+        except: 
+            authenticator.login()
     
     if st.session_state.get("authentication_status") is False:
-        with col_centro: st.error('Usuário ou senha incorretos')
+        # Mensagem de erro também centralizada na coluna do meio
+        with col_centro: 
+            st.error('Usuário ou senha incorretos')
 
 # --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
