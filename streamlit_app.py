@@ -15,24 +15,14 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* 1. Centralização de Tabelas */
+    /* Centralização de Tabelas e Células */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
         text-align: center !important;
     }
 
-    /* 2. Centralizar Imagens (Logo) */
-    div[data-testid="stImage"] > img {
-        display: block;
-        margin-left: auto;
-        margin-right: auto;
-    }
-    div[data-testid="stImage"] {
-        justify-content: center;
-    }
-
-    /* 3. Centralizar Botão de Login */
+    /* Centralizar Botão de Login */
     div.stButton > button {
         width: 100%;
         display: block;
@@ -41,14 +31,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÃO DO LOGO ---
 def carregar_logo():
-    try:
-        return Image.open("logo.png")
-    except:
-        return None
+    try: return Image.open("logo.png")
+    except: return None
 
-# --- AUTH CONFIG (VIA SECRETS) ---
+# --- AUTH CONFIG ---
 try:
     auth_secrets = st.secrets["auth"]
     config = {
@@ -78,10 +65,11 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-# --- TELA DE LOGIN ---
+# --- TELA DE LOGIN (SEM LOGO, CENTRALIZADA) ---
 if not st.session_state.get("authentication_status"):
     
-    # Espaçamento para centralizar
+    # Espaçamento para centralizar verticalmente na tela
+    st.write("")
     st.write("")
     st.write("")
     st.write("")
@@ -90,11 +78,7 @@ if not st.session_state.get("authentication_status"):
     col_esq, col_centro, col_dir = st.columns([3, 2, 3])
     
     with col_centro:
-        logo = carregar_logo()
-        if logo: 
-            # Logo menor e centralizado
-            st.image(logo, width=200) 
-        
+        # AQUI: Logo removido conforme solicitado para visual mais limpo
         try: 
             authenticator.login(location='main')
         except: 
@@ -110,8 +94,7 @@ if st.session_state.get("authentication_status"):
     
     # --- SIDEBAR ---
     with st.sidebar:
-        logo = carregar_logo()
-        if logo: 
+        if logo := carregar_logo(): 
             st.image(logo, use_container_width=True) 
             st.divider()
             
@@ -154,8 +137,7 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # --- CARREGAMENTO SILENCIOSO ---
-        # O show_spinner=False impede qualquer mensagem de carregamento
+        # --- CARREGAMENTO SILENCIOSO (SEM MENSAGENS) ---
         df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
@@ -234,7 +216,6 @@ if st.session_state.get("authentication_status"):
 
         # === APLICAÇÃO DOS FILTROS ===
         mask = pd.Series([True] * len(df_resumo))
-        
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         
         if filtro_comb:
