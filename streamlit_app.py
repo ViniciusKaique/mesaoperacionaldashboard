@@ -32,6 +32,17 @@ st.markdown("""
         align-items: center;
         gap: 10px;
     }
+
+    /* --- CENTRALIZAR LOGO E IMAGENS --- */
+    div[data-testid="stImage"] {
+        display: flex;
+        justify-content: center;
+    }
+    
+    /* Centralizar botão de login */
+    div.stButton > button {
+        width: 100%;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -74,11 +85,14 @@ authenticator = stauth.Authenticate(
 
 # --- LOGIN ---
 if not st.session_state.get("authentication_status"):
+    # Espaçamento para centralizar verticalmente
+    st.markdown("<br><br><br>", unsafe_allow_html=True)
+    
     col_esq, col_centro, col_dir = st.columns([1, 1.5, 1])
     with col_centro:
         logo = carregar_logo()
         if logo: 
-            # Logo menor na tela de login (250px)
+            # Logo menor (250px) e centralizado pelo CSS acima
             st.image(logo, width=250) 
         
         try: authenticator.login(location='main')
