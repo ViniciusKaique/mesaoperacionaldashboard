@@ -21,11 +21,21 @@ st.markdown("""
         justify-content: center !important;
         text-align: center !important;
     }
+
+    /* --- ESTILO DA MENSAGEM DE CARREGAMENTO (SPINNER MAIOR) --- */
+    div[data-testid="stSpinner"] > div {
+        font-size: 24px !important;   /* Letra Grande */
+        font-weight: bold !important; /* Negrito */
+        color: #ff4b4b !important;    /* Cor Vermelha do Tema */
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # --- FUNÇÃO DO LOGO ---
-# Ele procura o arquivo "logo.png" na mesma pasta do script
 def carregar_logo():
     try:
         return Image.open("logo.png")
@@ -33,7 +43,6 @@ def carregar_logo():
         return None
 
 # --- AUTH CONFIG (VIA SECRETS) ---
-# O código busca as senhas no secrets.toml do Cloud
 try:
     auth_secrets = st.secrets["auth"]
     config = {
@@ -67,10 +76,10 @@ authenticator = stauth.Authenticate(
 if not st.session_state.get("authentication_status"):
     col_esq, col_centro, col_dir = st.columns([1, 1.5, 1])
     with col_centro:
-        # Carrega o logo aqui na tela de login
         logo = carregar_logo()
         if logo: 
-            st.image(logo, use_container_width=True)
+            # Logo menor na tela de login (250px)
+            st.image(logo, width=250) 
         
         try: authenticator.login(location='main')
         except: authenticator.login()
@@ -84,10 +93,9 @@ if st.session_state.get("authentication_status"):
     
     # --- SIDEBAR ---
     with st.sidebar:
-        # Carrega o logo aqui na barra lateral
         logo = carregar_logo()
         if logo: 
-            st.image(logo, use_container_width=True)
+            st.image(logo, use_container_width=True) 
             st.divider()
             
         st.write(f"👤 **{name}**")
@@ -96,8 +104,7 @@ if st.session_state.get("authentication_status"):
         st.info("Painel Gerencial + Detalhe")
 
     try:
-        # --- CONEXÃO INTELIGENTE (SQLAlchemy + Pooler) ---
-        # Conecta usando as credenciais [connections.postgres] do secrets.toml
+        # --- CONEXÃO INTELIGENTE ---
         conn = st.connection("postgres", type="sql")
 
         # --- QUERIES ---
@@ -130,8 +137,10 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        df_resumo = conn.query(query_resumo, ttl=0)
-        df_pessoas = conn.query(query_funcionarios, ttl=0)
+        # --- CARREGAMENTO COM MENSAGEM AJUSTADA ---
+        with st.spinner("🕵️‍♂️ Consultando os registros de cada escola... Aguarde! 🔍"):
+            df_resumo = conn.query(query_resumo, ttl=0)
+            df_pessoas = conn.query(query_funcionarios, ttl=0)
 
         # --- PROCESSAMENTO ---
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
