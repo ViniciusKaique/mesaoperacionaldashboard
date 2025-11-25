@@ -113,10 +113,6 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        with st.spinner("🕵️‍♂️ Consultando o efetivo das escolas... Aguarde! 🔍"):
-            df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
-            df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
-
         # Executa as queries
         df_resumo = conn.query(query_resumo, ttl=0)
         df_pessoas = conn.query(query_funcionarios, ttl=0)
