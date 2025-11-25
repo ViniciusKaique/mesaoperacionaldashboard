@@ -21,13 +21,6 @@ st.markdown("""
         justify-content: center !important;
         text-align: center !important;
     }
-
-    /* --- CORREÇÃO DO LOGO (Mínimo de Código) --- */
-    /* Isso centraliza qualquer imagem dentro da coluna */
-    [data-testid="stImage"] {
-        display: flex;
-        justify-content: center;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -36,27 +29,23 @@ def carregar_logo():
     except: return None
 
 # --- AUTH CONFIG ---
-try:
-    auth_secrets = st.secrets["auth"]
-    config = {
-        'credentials': {
-            'usernames': {
-                auth_secrets["username"]: {
-                    'name': auth_secrets["name"],
-                    'password': auth_secrets["password_hash"],
-                    'email': auth_secrets["email"]
-                }
+auth_secrets = st.secrets["auth"]
+config = {
+    'credentials': {
+        'usernames': {
+            auth_secrets["username"]: {
+                'name': auth_secrets["name"],
+                'password': auth_secrets["password_hash"],
+                'email': auth_secrets["email"]
             }
-        },
-        'cookie': {
-            'name': auth_secrets["cookie_name"],
-            'key': auth_secrets["cookie_key"],
-            'expiry_days': auth_secrets["cookie_expiry_days"]
         }
+    },
+    'cookie': {
+        'name': auth_secrets["cookie_name"],
+        'key': auth_secrets["cookie_key"],
+        'expiry_days': auth_secrets["cookie_expiry_days"]
     }
-except:
-    st.error("Configure o arquivo .streamlit/secrets.toml")
-    st.stop()
+}
 
 authenticator = stauth.Authenticate(
     config['credentials'],
@@ -69,9 +58,7 @@ authenticator = stauth.Authenticate(
 if not st.session_state.get("authentication_status"):
     col_esq, col_centro, col_dir = st.columns([1, 1.5, 1])
     with col_centro:
-        if logo := carregar_logo(): 
-            # AQUI: Mudei para width=200 (menor) e o CSS acima centraliza
-            st.image(logo, width=200) 
+        if logo := carregar_logo(): st.image(logo, use_container_width=True)
         try: authenticator.login(location='main')
         except: authenticator.login()
     
@@ -92,9 +79,11 @@ if st.session_state.get("authentication_status"):
 
     try:
         # --- CONEXÃO INTELIGENTE (SQLAlchemy + Pooler) ---
+        # "postgres" refere-se à seção [connections.postgres] no secrets.toml
+        # ttl=0 garante dados frescos a cada recarregamento
         conn = st.connection("postgres", type="sql")
 
-        # --- QUERIES ---
+        # --- QUERIES (Aspas duplas obrigatórias no Postgres para preservar Case) ---
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
@@ -125,14 +114,17 @@ if st.session_state.get("authentication_status"):
         """
 
         # Executa as queries
-        with st.spinner("Consultando o efetivo..."):
-            df_resumo = conn.query(query_resumo, ttl=0)
-            df_pessoas = conn.query(query_funcionarios, ttl=0)
+        df_resumo = conn.query(query_resumo, ttl=0)
+        df_pessoas = conn.query(query_funcionarios, ttl=0)
 
-        # --- PROCESSAMENTO PYTHON ---
+        # --- PROCESSAMENTO PYTHON (Mais seguro e rápido que SQL complexo) ---
+        # Calcula diferença
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
+        
+        # Cria String de exibição (+1, -2, 0)
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
 
+        # Define Status
         def define_status(row):
             diff = row['Diferenca_num']
             if diff < 0: return '🔴 FALTA'
@@ -140,6 +132,7 @@ if st.session_state.get("authentication_status"):
             return '🟢 OK'
         
         df_resumo['Status_display'] = df_resumo.apply(define_status, axis=1)
+        # Cria coluna Status limpa para os filtros
         df_resumo['Status'] = df_resumo['Status_display'].apply(lambda x: x.split(' ')[1])
 
         # === DASHBOARD GERAL ===
@@ -173,13 +166,15 @@ if st.session_state.get("authentication_status"):
                 display_df = df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'})
                 display_df[['Edital','Real']] = display_df[['Edital','Real']].astype(str)
 
+                # Função de estilo unificada
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
-                    if '-' in val: styles[3] = base + 'color: #ff4b4b;' 
-                    elif '+' in val: styles[3] = base + 'color: #29b6f6;' 
-                    else: styles[3] = base + 'color: #00c853;' 
+                    
+                    if '-' in val: styles[3] = base + 'color: #ff4b4b;' # Vermelho
+                    elif '+' in val: styles[3] = base + 'color: #29b6f6;' # Azul
+                    else: styles[3] = base + 'color: #00c853;' # Verde
                     return styles
                 
                 st.dataframe(display_df.style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
@@ -202,21 +197,25 @@ if st.session_state.get("authentication_status"):
         st.markdown("---")
 
         # === APLICAÇÃO DOS FILTROS ===
+        # 1. Filtro Básico (Escola)
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         
+        # 2. Filtro Complexo (Status por Cargo)
         if filtro_comb:
             escolas_validas = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
                 valid = True
                 for c, s in filtro_comb.items():
+                    # Verifica se o cargo existe na escola e se o status bate
                     row = df_e[df_e['Cargo'] == c]
                     if row.empty or row['Status'].iloc[0] != s:
                         valid = False; break
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
         
+        # 3. Filtro Busca (Nome/ID)
         if termo_busca:
             match = df_pessoas[df_pessoas['Funcionario'].astype(str).str.contains(termo_busca, case=False) | 
                                df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
@@ -238,16 +237,18 @@ if st.session_state.get("authentication_status"):
             with st.expander(f"{icon} {escola}", expanded=False):
                 st.markdown("#### 📊 Quadro de Vagas")
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
-                d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
+                d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str) # String para centralizar
 
                 def style_escola(row):
                     styles = ['text-align: center;'] * 5
+                    # Diferença
                     val = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
                     if '-' in val: styles[3] = base + 'color: #ff4b4b;'
                     elif '+' in val: styles[3] = base + 'color: #29b6f6;'
                     else: styles[3] = base + 'color: #00c853;'
                     
+                    # Status
                     stt = str(row['Status'])
                     if '🔴' in stt: styles[4] = base + 'color: #ff4b4b;'
                     elif '🔵' in stt: styles[4] = base + 'color: #29b6f6;'
@@ -268,4 +269,4 @@ if st.session_state.get("authentication_status"):
                     st.warning("Nenhum colaborador encontrado.")
 
     except Exception as e:
-        st.error(f"Erro de conexão ou dados: {e}")
+        st.error(f"Erro no banco de dados: {e}")
