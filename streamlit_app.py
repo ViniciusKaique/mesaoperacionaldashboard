@@ -2,7 +2,8 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import pandas as pd
 import plotly.express as px
-import psycopg2 # Biblioteca para conectar no Postgres
+import psycopg2 
+import socket # <--- NOVA IMPORTAÇÃO NECESSÁRIA
 from PIL import Image
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -32,7 +33,6 @@ def carregar_logo():
         return None
 
 # --- AUTH CONFIG (VIA SECRETS) ---
-# Montamos o dicionário que o stauth espera usando os dados seguros
 auth_secrets = st.secrets["auth"]
 
 config = {
@@ -77,11 +77,28 @@ if st.session_state.get("authentication_status") is None or st.session_state.get
         with col_centro:
             st.error('Usuário ou senha incorretos')
 
-# --- FUNÇÃO DE CONEXÃO AO POSTGRES ---
-# O uso de st.cache_resource evita reconectar a cada clique, economizando recursos
+# --- FUNÇÃO DE CONEXÃO AO POSTGRES (CORRIGIDA PARA IPv4) ---
 @st.cache_resource
 def init_connection():
-    return psycopg2.connect(**st.secrets["postgres"])
+    db_config = st.secrets["postgres"]
+    
+    # TRUQUE PARA CORRIGIR O ERRO "Cannot assign requested address" (IPv6)
+    # Nós resolvemos o DNS manualmente para pegar o IP numérico (IPv4)
+    try:
+        ip_v4 = socket.gethostbyname(db_config["host"])
+    except socket.gaierror:
+        # Se falhar, tenta usar o host original
+        ip_v4 = db_config["host"]
+
+    return psycopg2.connect(
+        host=db_config["host"],       # Mantém o domínio para validar o certificado SSL
+        hostaddr=ip_v4,               # Força a conexão no IP v4 encontrado
+        port=db_config["port"],
+        user=db_config["user"],
+        password=db_config["password"],
+        dbname=db_config["dbname"],
+        sslmode=db_config.get("sslmode", "require") 
+    )
 
 # --- SISTEMA PRINCIPAL (PÓS-LOGIN) ---
 if st.session_state.get("authentication_status") is True:
@@ -99,10 +116,9 @@ if st.session_state.get("authentication_status") is True:
         st.info("Painel Gerencial + Detalhe")
 
     try:
-        # Abre conexão com Supabase
         conn = init_connection()
 
-        # --- QUERIES (Mantidas as mesmas, SQL padrão funciona no PG) ---
+        # --- QUERIES ---
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
@@ -137,18 +153,9 @@ if st.session_state.get("authentication_status") is True:
         WHERE col."Ativo" = TRUE
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
-        
-        # NOTA IMPORTANTE SOBRE SQLITE vs POSTGRES:
-        # Se você criou as tabelas no Supabase usando aspas (Ex: "NomeUnidade"), 
-        # você precisa usar aspas duplas nas queries como fiz acima.
-        # Se criou tudo minúsculo sem aspas, pode remover as aspas duplas das queries.
-        # Ajustei o BOOLEAN: troquei `Ativo = 1` por `Ativo = TRUE` (padrão Postgres).
 
         df_resumo = pd.read_sql(query_resumo, conn)
         df_pessoas = pd.read_sql(query_funcionarios, conn)
-        
-        # Não fechamos a conexão aqui se usarmos o cache, mas o pandas
-        # geralmente lida bem com a leitura sem travar a conexão.
 
         # --- PRÉ-PROCESSAMENTO ---
         if 'Diferenca' in df_resumo.columns:
@@ -156,10 +163,8 @@ if st.session_state.get("authentication_status") is True:
         else:
             df_resumo['Diferenca_num'] = 0
 
-        # Formatação (+2, -5, 0)
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
 
-        # Status com Emoji
         def status_with_emoji(s):
             if s == 'FALTA': return '🔴 FALTA'
             elif s == 'EXCEDENTE': return '🔵 EXCEDENTE'
@@ -205,26 +210,18 @@ if st.session_state.get("authentication_status") is True:
                 st.plotly_chart(fig, use_container_width=True)
             
             with col_g2:
-                # TRUQUE: Converter para String para forçar alinhamento central
                 display_df_geral = df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'})
                 display_df_geral['Edital'] = display_df_geral['Edital'].astype(str)
                 display_df_geral['Real'] = display_df_geral['Real'].astype(str)
 
-                # Função de estilo com cores e ALINHAMENTO centralizado
                 def style_geral(row):
                     styles = ['text-align: center;'] * len(display_df_geral.columns)
                     idx_diff = display_df_geral.columns.get_loc('Diferenca')
-                    
                     val_str = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
-
-                    if '-' in val_str:
-                        styles[idx_diff] = base + 'color: #ff4b4b;' # Vermelho
-                    elif '+' in val_str:
-                        styles[idx_diff] = base + 'color: #29b6f6;' # Azul
-                    else:
-                        styles[idx_diff] = base + 'color: #00c853;' # Verde
-                    
+                    if '-' in val_str: styles[idx_diff] = base + 'color: #ff4b4b;'
+                    elif '+' in val_str: styles[idx_diff] = base + 'color: #29b6f6;'
+                    else: styles[idx_diff] = base + 'color: #00c853;'
                     return styles
                 
                 styler_resumo = display_df_geral.style.apply(style_geral, axis=1)
@@ -236,68 +233,52 @@ if st.session_state.get("authentication_status") is True:
         st.markdown("---")
         st.subheader("🏫 Detalhe por Escola")
 
-        # --- FILTROS (DIAGNÓSTICO + BUSCA COLABORADOR) ---
+        # --- FILTROS ---
         st.markdown("##### 🛠️ Filtro de Diagnóstico")
-        col_diag1, col_diag2 = st.columns([1,1]) # Divide espaço igual
-        
+        col_diag1, col_diag2 = st.columns([1,1])
         with col_diag1:
             lista_escolas = ["Todas"] + sorted(list(df_resumo['Escola'].unique()))
             filtro_escola = st.selectbox("🔍 Filtrar por Escola:", lista_escolas, key='filtro_escola_principal')
-
         with col_diag2:
-            # --- NOVO FILTRO DE BUSCA ---
             termo_busca = st.text_input("👤 Buscar Colaborador (Nome ou ID):", "")
 
         col_cargos = list(df_resumo['Cargo'].unique())
         st.markdown("---")
         st.markdown("##### 🔍 Condições Múltiplas")
-        
         filtro_combinacao = {}
         cols_filter = st.columns(5)
         for i, cargo in enumerate(col_cargos):
             with cols_filter[i % 5]:
                 opcoes = ["Todos"] + ["FALTA","EXCEDENTE","OK"]
                 selecao = st.selectbox(label=cargo, options=opcoes, key=f'cargo_filtro_{i}')
-                if selecao != "Todos":
-                    filtro_combinacao[cargo] = selecao
+                if selecao != "Todos": filtro_combinacao[cargo] = selecao
 
         st.markdown("---")
 
-        # === LÓGICA DE FILTRAGEM (AJUSTADA PARA BUSCA) ===
+        # === LÓGICA DE FILTRAGEM ===
         df_filtrado = df_resumo.copy()
-        
-        # 1. Filtro Selectbox Escola
         if filtro_escola != "Todas":
             df_filtrado = df_filtrado[df_filtrado['Escola'] == filtro_escola]
 
         escolas_para_mostrar = []
         todas_escolas_candidatas = df_filtrado['Escola'].unique()
         
-        # 2. Filtro Status (Loop)
         for escola in todas_escolas_candidatas:
             df_da_escola = df_resumo[df_resumo['Escola'] == escola]
             atende = True
             for cargo, status_desejado in filtro_combinacao.items():
                 status_real_row = df_da_escola[df_da_escola['Cargo'] == cargo]['Status']
                 if status_real_row.empty:
-                    atende = False
-                    break
+                    atende = False; break
                 status_real = status_real_row.iloc[0]
                 if status_real != status_desejado:
-                    atende = False
-                    break
-            if atende:
-                escolas_para_mostrar.append(escola)
+                    atende = False; break
+            if atende: escolas_para_mostrar.append(escola)
 
-        # 3. --- NOVO: FILTRO POR COLABORADOR (SOBREPÕE OU REFINA) ---
         if termo_busca:
-            # Encontra pessoas que dão match no nome OU no ID
             mask_colab = df_pessoas['Funcionario'].astype(str).str.contains(termo_busca, case=False, na=False) | \
                          df_pessoas['ID'].astype(str).str.contains(termo_busca, case=False, na=False)
-            
             escolas_com_match = df_pessoas[mask_colab]['Escola'].unique()
-            
-            # Mantém apenas as escolas que já passaram pelos filtros anteriores E têm o colaborador
             escolas_para_mostrar = [e for e in escolas_para_mostrar if e in escolas_com_match]
 
         st.info(f"**Encontradas {len(escolas_para_mostrar)} escolas com os critérios selecionados.**")
@@ -308,10 +289,8 @@ if st.session_state.get("authentication_status") is True:
             df_escola_resumo['Diferenca_num'] = pd.to_numeric(df_escola_resumo.get('Diferenca_num', 0), errors='coerce').fillna(0).astype(int)
             df_escola_resumo['Diferenca_display'] = df_escola_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
 
-            try:
-                tipo_escola = df_escola_resumo['Tipo'].iloc[0]
-            except:
-                tipo_escola = "UNIDADE"
+            try: tipo_escola = df_escola_resumo['Tipo'].iloc[0]
+            except: tipo_escola = "UNIDADE"
 
             status_para_icone = df_escola_resumo['Status'].tolist()
             icon = "🏫"
@@ -320,61 +299,38 @@ if st.session_state.get("authentication_status") is True:
             elif "OK" in status_para_icone and len(set(status_para_icone)) == 1: icon = "✅"
 
             with st.expander(f"{icon} {tipo_escola} {escola}", expanded=False):
-                # 1. QUADRO DE VAGAS
                 st.markdown("#### 📊 Quadro de Vagas")
-                
                 display_df = df_escola_resumo[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
-                
-                # TRUQUE: Converter numéricos para STRING para centralização
                 display_df['Edital'] = display_df['Edital'].astype(str)
                 display_df['Real'] = display_df['Real'].astype(str)
 
                 def style_row(row):
                     styles = ['text-align: center;'] * len(display_df.columns)
-                    
                     idx_diff = display_df.columns.get_loc('Diferenca')
                     idx_status = display_df.columns.get_loc('Status')
+                    try: num = int(str(row['Diferenca']).replace('+', ''))
+                    except: num = 0
                     
-                    try:
-                        val_str = str(row['Diferenca']).replace('+', '')
-                        num = int(val_str)
-                    except:
-                        num = 0
-                    
-                    # Estilo Diferença
                     diff_base = 'text-align: center; font-weight: bold;'
-                    if num < 0:
-                        styles[idx_diff] = diff_base + ' color: #ff4b4b;'
-                    elif num > 0:
-                        styles[idx_diff] = diff_base + ' color: #29b6f6;'
-                    else:
-                        styles[idx_diff] = diff_base + ' color: #00c853;'
+                    if num < 0: styles[idx_diff] = diff_base + ' color: #ff4b4b;'
+                    elif num > 0: styles[idx_diff] = diff_base + ' color: #29b6f6;'
+                    else: styles[idx_diff] = diff_base + ' color: #00c853;'
 
-                    # Estilo Status
                     status_base = 'text-align: center;'
                     stt = str(row['Status'])
-                    if '🔴' in stt:
-                        styles[idx_status] = status_base + ' color: #ff4b4b; font-weight:bold;'
-                    elif '🔵' in stt:
-                        styles[idx_status] = status_base + ' color: #29b6f6; font-weight:bold;'
-                    elif '🟢' in stt:
-                        styles[idx_status] = status_base + ' color: #00c853; font-weight:bold;'
-                    else:
-                        styles[idx_status] = status_base
-                        
+                    if '🔴' in stt: styles[idx_status] = status_base + ' color: #ff4b4b; font-weight:bold;'
+                    elif '🔵' in stt: styles[idx_status] = status_base + ' color: #29b6f6; font-weight:bold;'
+                    elif '🟢' in stt: styles[idx_status] = status_base + ' color: #00c853; font-weight:bold;'
+                    else: styles[idx_status] = status_base
                     return styles
 
                 styler = display_df.style.apply(style_row, axis=1)
                 styler = styler.set_properties(**{'text-align': 'center'})
                 styler = styler.set_table_styles([{'selector': 'th', 'props': [('text-align', 'center')]}])
-                
                 st.dataframe(styler, use_container_width=True, hide_index=True)
 
-                # 2. LISTA DE COLABORADORES
                 st.markdown("#### 📋 Lista de Colaboradores")
                 df_escola_pessoas = df_pessoas[df_pessoas['Escola'] == escola]
-                
-                # --- APLICA O FILTRO NA TABELA DE PESSOAS SE HOUVER BUSCA ---
                 if termo_busca:
                      mask_pessoa = df_escola_pessoas['Funcionario'].astype(str).str.contains(termo_busca, case=False, na=False) | \
                                    df_escola_pessoas['ID'].astype(str).str.contains(termo_busca, case=False, na=False)
