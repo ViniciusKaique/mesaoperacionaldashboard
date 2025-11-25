@@ -7,7 +7,7 @@ from PIL import Image
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
 
-# --- CSS PERSONALIZADO ---
+# --- CSS PERSONALIZADO (ARQUITETURA FINAL) ---
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; }
@@ -15,36 +15,40 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* Centralização Geral de Tabelas */
+    /* === 1. CENTRALIZAÇÃO DE TABELAS === */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
         text-align: center !important;
     }
 
-    /* --- ESTILO DA MENSAGEM DE CARREGAMENTO --- */
-    div[data-testid="stSpinner"] > div {
-        font-size: 24px !important;
-        font-weight: bold !important;
-        color: #ff4b4b !important;
-        display: flex;
-        justify-content: center;
+    /* === 2. ESTILO DA MENSAGEM DE CARREGAMENTO (SUPER SPINNER) === */
+    div[data-testid="stSpinner"] {
+        text-align: center;
         align-items: center;
-        gap: 10px;
+        justify-content: center;
+    }
+    
+    div[data-testid="stSpinner"] > div {
+        font-size: 28px !important;    /* Texto Grande */
+        font-weight: bold !important;  /* Negrito */
+        color: #ff4b4b !important;     /* Vermelho do Tema */
+        text-align: center !important; 
+        line-height: 1.5 !important;
+        white-space: nowrap;           /* ESSENCIAL: Impede que o texto quebre/repita */
     }
 
-    /* --- FORÇAR CENTRALIZAÇÃO DA IMAGEM (LOGO) --- */
+    /* === 3. CENTRALIZAR IMAGENS (LOGO) === */
     div[data-testid="stImage"] > img {
         display: block;
         margin-left: auto;
         margin-right: auto;
-        width: 100%;
     }
     div[data-testid="stImage"] {
         justify-content: center;
     }
 
-    /* --- CENTRALIZAR BOTÃO DE LOGIN --- */
+    /* === 4. CENTRALIZAR BOTÃO DE LOGIN === */
     div.stButton > button {
         width: 100%;
         display: block;
@@ -80,7 +84,7 @@ try:
         }
     }
 except Exception as e:
-    st.error("Erro ao carregar Secrets de Autenticação. Verifique o arquivo secrets.toml.")
+    st.error("Erro Crítico: Secrets não configurados. Verifique o arquivo .streamlit/secrets.toml")
     st.stop()
 
 authenticator = stauth.Authenticate(
@@ -90,25 +94,23 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-# --- LOGIN ---
+# --- TELA DE LOGIN ---
 if not st.session_state.get("authentication_status"):
     
-    # 1. Espaço vazio para empurrar para o meio verticalmente
+    # Espaçamento para centralizar verticalmente na tela
     st.write("")
     st.write("")
     st.write("")
     st.write("")
-    st.write("")
-
-    # 2. Colunas para Centralização Horizontal [Lateral, Meio, Lateral]
-    # Usando [3, 2, 3] deixamos a coluna do meio mais estreita e focada
+    
+    # Colunas [3, 2, 3] para focar o conteúdo no centro
     col_esq, col_centro, col_dir = st.columns([3, 2, 3])
     
     with col_centro:
         logo = carregar_logo()
         if logo: 
-            # Sem definir width fixo aqui, deixamos o CSS e a coluna controlarem
-            st.image(logo, use_container_width=True) 
+            # Logo fixo em 200px (Fica mais elegante no login)
+            st.image(logo, width=200) 
         
         try: 
             authenticator.login(location='main')
@@ -116,11 +118,10 @@ if not st.session_state.get("authentication_status"):
             authenticator.login()
     
     if st.session_state.get("authentication_status") is False:
-        # Mensagem de erro também centralizada na coluna do meio
         with col_centro: 
             st.error('Usuário ou senha incorretos')
 
-# --- SISTEMA PRINCIPAL ---
+# --- SISTEMA PRINCIPAL (PÓS-LOGIN) ---
 if st.session_state.get("authentication_status"):
     name = st.session_state.get("name")
     
@@ -128,6 +129,7 @@ if st.session_state.get("authentication_status"):
     with st.sidebar:
         logo = carregar_logo()
         if logo: 
+            # Na sidebar, usamos full width
             st.image(logo, use_container_width=True) 
             st.divider()
             
@@ -137,10 +139,10 @@ if st.session_state.get("authentication_status"):
         st.info("Painel Gerencial + Detalhe")
 
     try:
-        # --- CONEXÃO INTELIGENTE ---
+        # --- CONEXÃO INTELIGENTE (Supabase Pooler) ---
         conn = st.connection("postgres", type="sql")
 
-        # --- QUERIES ---
+        # --- QUERIES SQL (Postgres Syntax) ---
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
@@ -170,12 +172,14 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # --- CARREGAMENTO COM MENSAGEM AJUSTADA ---
-        with st.spinner("🕵️‍♂️ Consultando os registros de cada escola... Aguarde! 🔍"):
+        # --- CARREGAMENTO COM SPINNER PERSONALIZADO ---
+        # A mensagem é grande, vermelha e não quebra linha graças ao CSS
+        with st.spinner("Consultando o efetivo das escolas... Aguarde! 🔍"):
             df_resumo = conn.query(query_resumo, ttl=0)
             df_pessoas = conn.query(query_funcionarios, ttl=0)
 
-        # --- PROCESSAMENTO ---
+        # --- PROCESSAMENTO DE DADOS ---
+        # Cálculos feitos no Python para evitar complexidade no SQL
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
 
@@ -202,7 +206,7 @@ if st.session_state.get("authentication_status"):
 
         st.markdown("---")
 
-        # === RESUMO ===
+        # === GRÁFICOS E RESUMO ===
         with st.expander("📈 Ver Gráficos e Resumo Geral", expanded=True):
             df_por_cargo = df_resumo.groupby('Cargo')[['Edital','Real']].sum().reset_index()
             df_por_cargo['Diferenca_num'] = df_por_cargo['Real'] - df_por_cargo['Edital']
@@ -250,8 +254,11 @@ if st.session_state.get("authentication_status"):
 
         # === APLICAÇÃO DOS FILTROS ===
         mask = pd.Series([True] * len(df_resumo))
+        
+        # 1. Filtro Escola
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         
+        # 2. Filtro de Status Múltiplo
         if filtro_comb:
             escolas_validas = []
             for escola in df_resumo['Escola'].unique():
@@ -264,6 +271,7 @@ if st.session_state.get("authentication_status"):
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
         
+        # 3. Filtro de Busca de Colaborador (Filtra escolas que possuem o colaborador)
         if termo_busca:
             match = df_pessoas[df_pessoas['Funcionario'].astype(str).str.contains(termo_busca, case=False) | 
                                df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
@@ -305,6 +313,8 @@ if st.session_state.get("authentication_status"):
 
                 st.markdown("#### 📋 Colaboradores")
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
+                
+                # Se houver busca, filtra a tabela de colaboradores também
                 if termo_busca:
                     p_show = p_show[p_show['Funcionario'].astype(str).str.contains(termo_busca, case=False) | 
                                     p_show['ID'].astype(str).str.contains(termo_busca)]
@@ -312,7 +322,7 @@ if st.session_state.get("authentication_status"):
                 if not p_show.empty:
                     st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True)
                 else:
-                    st.warning("Nenhum colaborador encontrado.")
+                    st.warning("Nenhum colaborador encontrado nesta unidade com o termo buscado.")
 
     except Exception as e:
-        st.error(f"Erro no banco de dados: {e}")
+        st.error(f"Erro ao conectar com o banco de dados. Verifique os Secrets. Erro: {e}")
