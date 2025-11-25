@@ -3,7 +3,7 @@ import streamlit_authenticator as stauth
 import pandas as pd
 import plotly.express as px
 import psycopg2 
-import socket # <--- NOVA IMPORTAÇÃO NECESSÁRIA
+import socket 
 from PIL import Image
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
@@ -77,28 +77,36 @@ if st.session_state.get("authentication_status") is None or st.session_state.get
         with col_centro:
             st.error('Usuário ou senha incorretos')
 
-# --- FUNÇÃO DE CONEXÃO AO POSTGRES (CORRIGIDA PARA IPv4) ---
+# --- FUNÇÃO DE CONEXÃO AO POSTGRES (CORRIGIDA E ROBUSTA) ---
 @st.cache_resource
 def init_connection():
     db_config = st.secrets["postgres"]
     
-    # TRUQUE PARA CORRIGIR O ERRO "Cannot assign requested address" (IPv6)
-    # Nós resolvemos o DNS manualmente para pegar o IP numérico (IPv4)
+    # 1. Tenta resolver o IP numérico (IPv4) manualmente para evitar bug de IPv6
+    ip_v4 = None
     try:
         ip_v4 = socket.gethostbyname(db_config["host"])
-    except socket.gaierror:
-        # Se falhar, tenta usar o host original
-        ip_v4 = db_config["host"]
+    except Exception as e:
+        # Se falhar o DNS, segue sem o IP numérico (usa o padrão do driver)
+        print(f"Aviso: Não foi possível resolver DNS manualmente: {e}")
+        ip_v4 = None
 
-    return psycopg2.connect(
-        host=db_config["host"],       # Mantém o domínio para validar o certificado SSL
-        hostaddr=ip_v4,               # Força a conexão no IP v4 encontrado
-        port=db_config["port"],
-        user=db_config["user"],
-        password=db_config["password"],
-        dbname=db_config["dbname"],
-        sslmode=db_config.get("sslmode", "require") 
-    )
+    # 2. Monta os parâmetros básicos
+    conn_params = {
+        "host": db_config["host"],
+        "port": db_config["port"],
+        "user": db_config["user"],
+        "password": db_config["password"],
+        "dbname": db_config["dbname"],
+        "sslmode": db_config.get("sslmode", "require")
+    }
+
+    # 3. Se conseguimos o IP numérico, forçamos o uso dele no hostaddr
+    # Isso corrige o erro "Cannot assign requested address" sem causar "could not parse network address"
+    if ip_v4:
+        conn_params["hostaddr"] = ip_v4
+
+    return psycopg2.connect(**conn_params)
 
 # --- SISTEMA PRINCIPAL (PÓS-LOGIN) ---
 if st.session_state.get("authentication_status") is True:
