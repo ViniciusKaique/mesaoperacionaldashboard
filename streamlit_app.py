@@ -90,15 +90,16 @@ if st.session_state.get("authentication_status"):
     try:
         conn = st.connection("postgres", type="sql")
 
-        # --- QUERIES (ATUALIZADA COM A NOVA COLUNA) ---
+        # --- QUERIES ---
+        # AJUSTE: Pegando a DataConferencia da tabela UNIDADES (u)
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
             u."NomeUnidade" AS "Escola",
+            u."DataConferencia",  -- Data vinda da tabela Unidades
             s."NomeSupervisor" AS "Supervisor", 
             c."NomeCargo" AS "Cargo",
             q."Quantidade" AS "Edital",
-            q."DataConferencia",  -- ADICIONADO AQUI
             (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
         FROM "QuadroEdital" q
         JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
@@ -128,11 +129,9 @@ if st.session_state.get("authentication_status"):
         # --- PROCESSAMENTO ---
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
-
-        # FORMATAÇÃO DA DATA (DD/MM/AAAA)
-        # Converte para datetime e depois formata. Se for nulo, coloca um traço "-"
+        
+        # Converte data para datetime
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
-        df_resumo['Conferido'] = df_resumo['DataConferencia'].dt.strftime('%d/%m/%Y').fillna('-')
 
         def define_status(row):
             diff = row['Diferenca_num']
@@ -237,7 +236,17 @@ if st.session_state.get("authentication_status"):
         for escola in df_final['Escola'].unique():
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
+            
+            # Pega supervisor
             nome_supervisor = df_e['Supervisor'].iloc[0] if not df_e.empty else "N/A"
+            
+            # Pega data de conferência
+            raw_date = df_e['DataConferencia'].iloc[0]
+            if pd.isnull(raw_date):
+                str_data = '<span style="color:#ff4b4b; font-weight:bold;">Pendente ⚠️</span>'
+            else:
+                fmt = raw_date.strftime('%d/%m/%Y')
+                str_data = f'<span style="color:#00c853; font-weight:bold;">{fmt} ✅</span>'
 
             icon = "🏫"
             if "FALTA" in status_list: icon = "🔴"
@@ -245,30 +254,30 @@ if st.session_state.get("authentication_status"):
             elif "OK" in status_list and len(set(status_list)) == 1: icon = "✅"
 
             with st.expander(f"{icon} {escola}", expanded=False):
-                st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
-                st.markdown("#### 📊 Quadro de Vagas")
+                # MOSTRA SUPERVISOR E DATA NO TOPO DO DETALHE
+                st.markdown(f"""
+                <div style='background-color: #262730; padding: 10px; border-radius: 5px; margin-bottom: 10px; border: 1px solid #404040;'>
+                    <b>👨‍💼 Supervisor:</b> {nome_supervisor} &nbsp;&nbsp;|&nbsp;&nbsp; 
+                    <b>📅 Conferência:</b> {str_data}
+                </div>
+                """, unsafe_allow_html=True)
                 
-                # ADICIONADO A COLUNA 'Conferido' NO DISPLAY
-                d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display', 'Conferido']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
+                st.markdown("#### 📊 Quadro de Vagas")
+                d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
 
                 def style_escola(row):
-                    # Agora são 6 colunas (adicionei Conferido)
-                    styles = ['text-align: center;'] * 6 
-                    
-                    # Coluna Diferenca (index 3)
+                    styles = ['text-align: center;'] * 5
                     val = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
-                    if '-' in val: styles[3] = base + 'color: #ff4b4b;'
-                    elif '+' in val: styles[3] = base + 'color: #29b6f6;'
-                    else: styles[3] = base + 'color: #00c853;'
+                    if '-' in val: styles[3] = base + 'color: #ff4b4b;' 
+                    elif '+' in val: styles[3] = base + 'color: #29b6f6;' 
+                    else: styles[3] = base + 'color: #00c853;' 
                     
-                    # Coluna Status (index 4)
                     stt = str(row['Status'])
                     if '🔴' in stt: styles[4] = base + 'color: #ff4b4b;'
                     elif '🔵' in stt: styles[4] = base + 'color: #29b6f6;'
                     else: styles[4] = base + 'color: #00c853;'
-                    
                     return styles
 
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
