@@ -15,7 +15,7 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* Centralização de Tabelas e Células */
+    /* Centralização Geral de Tabelas */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
@@ -65,10 +65,9 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-# --- TELA DE LOGIN (SEM LOGO, CENTRALIZADA) ---
+# --- TELA DE LOGIN (SEM LOGO) ---
 if not st.session_state.get("authentication_status"):
     
-    # Espaçamento para centralizar verticalmente na tela
     st.write("")
     st.write("")
     st.write("")
@@ -78,7 +77,6 @@ if not st.session_state.get("authentication_status"):
     col_esq, col_centro, col_dir = st.columns([3, 2, 3])
     
     with col_centro:
-        # AQUI: Logo removido conforme solicitado para visual mais limpo
         try: 
             authenticator.login(location='main')
         except: 
@@ -108,6 +106,7 @@ if st.session_state.get("authentication_status"):
         conn = st.connection("postgres", type="sql")
 
         # --- QUERIES ---
+        # A query_resumo JÁ traz a coluna "Supervisor", então não precisamos mexer no SQL
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
@@ -137,7 +136,7 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # --- CARREGAMENTO SILENCIOSO (SEM MENSAGENS) ---
+        # --- CARREGAMENTO ---
         df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
@@ -200,10 +199,22 @@ if st.session_state.get("authentication_status"):
         st.markdown("---")
         st.subheader("🏫 Detalhe por Escola")
 
-        # --- FILTROS ---
-        c_diag1, c_diag2 = st.columns(2)
-        with c_diag1: filtro_escola = st.selectbox("🔍 Filtrar por Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
-        with c_diag2: termo_busca = st.text_input("👤 Buscar Colaborador (Nome ou ID):", "")
+        # --- FILTROS (AGORA COM SUPERVISOR) ---
+        st.markdown("##### 🛠️ Filtro de Diagnóstico")
+        # Dividi em 3 colunas para caber o Supervisor
+        col_f1, col_f2, col_f3 = st.columns([1.2, 1.2, 1])
+        
+        with col_f1: 
+            lista_escolas = ["Todas"] + sorted(list(df_resumo['Escola'].unique()))
+            filtro_escola = st.selectbox("🔍 Escola:", lista_escolas)
+        
+        with col_f2:
+            # LISTA DE SUPERVISORES UNICOS
+            lista_supervisores = ["Todos"] + sorted(list(df_resumo['Supervisor'].unique()))
+            filtro_supervisor = st.selectbox("👔 Supervisor:", lista_supervisores)
+
+        with col_f3: 
+            termo_busca = st.text_input("👤 Buscar Colaborador:", "")
 
         col_cargos = list(df_resumo['Cargo'].unique())
         filtro_comb = {}
@@ -216,8 +227,14 @@ if st.session_state.get("authentication_status"):
 
         # === APLICAÇÃO DOS FILTROS ===
         mask = pd.Series([True] * len(df_resumo))
+        
+        # 1. Filtro Escola
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         
+        # 2. Filtro Supervisor (NOVO)
+        if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
+
+        # 3. Filtro Complexo (Status por Cargo)
         if filtro_comb:
             escolas_validas = []
             for escola in df_resumo['Escola'].unique():
@@ -230,6 +247,7 @@ if st.session_state.get("authentication_status"):
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
         
+        # 4. Filtro Busca (Nome/ID)
         if termo_busca:
             match = df_pessoas[df_pessoas['Funcionario'].astype(str).str.contains(termo_busca, case=False) | 
                                df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
@@ -243,12 +261,18 @@ if st.session_state.get("authentication_status"):
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
             
+            # Pega o nome do supervisor dessa escola (pega o primeiro registro, já que é igual para a escola toda)
+            nome_supervisor = df_e['Supervisor'].iloc[0] if not df_e.empty else "N/A"
+
             icon = "🏫"
             if "FALTA" in status_list: icon = "🔴"
             elif "EXCEDENTE" in status_list: icon = "🔵"
             elif "OK" in status_list and len(set(status_list)) == 1: icon = "✅"
 
             with st.expander(f"{icon} {escola}", expanded=False):
+                # AQUI: Exibe o nome do Supervisor em destaque
+                st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
+                
                 st.markdown("#### 📊 Quadro de Vagas")
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
