@@ -29,6 +29,12 @@ st.markdown("""
 
     /* Botão Login */
     div.stButton > button { width: 100%; display: block; margin: 0 auto; }
+    
+    /* Ajuste para botão minimalista (pequeno) */
+    div[data-testid="column"] .stButton button {
+        width: auto !important; /* Deixa o botão do tamanho do texto */
+        min-width: 40px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -58,10 +64,10 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- FUNÇÃO: EDITAR COLABORADOR (JÁ EXISTIA) ---
+# --- FUNÇÃO: EDITAR COLABORADOR ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
-    st.write(f"Editando: **{colab_data['Funcionario']}**")
+    st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
     with st.form("form_edicao"):
         lista_escolas = df_unidades_all['NomeUnidade'].tolist()
         try: idx_escola = lista_escolas.index(colab_data['Escola'])
@@ -89,13 +95,19 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
-# --- FUNÇÃO NOVA: ADICIONAR COLABORADOR ---
-@st.dialog("➕ Adicionar Novo Colaborador")
+# --- FUNÇÃO NOVA: ADICIONAR COLABORADOR (COM ID MANUAL) ---
+@st.dialog("➕ Novo Colaborador")
 def adicionar_colaborador(unidade_atual_id, unidade_atual_nome, df_cargos_all, conn):
-    st.write(f"Adicionando colaborador em: **{unidade_atual_nome}**")
+    st.caption(f"Cadastrando na unidade: **{unidade_atual_nome}**")
     
     with st.form("form_add"):
-        nome_novo = st.text_input("Nome Completo:")
+        # Divide em colunas para ficar organizado
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            # CAMPO DE ID MANUAL (MATRÍCULA)
+            novo_id = st.number_input("Matrícula (ID):", min_value=1, step=1, format="%d")
+        with c2:
+            nome_novo = st.text_input("Nome Completo:")
         
         lista_cargos = df_cargos_all['NomeCargo'].tolist()
         cargo_novo_nome = st.selectbox("Cargo:", lista_cargos)
@@ -105,17 +117,25 @@ def adicionar_colaborador(unidade_atual_id, unidade_atual_nome, df_cargos_all, c
         if submit_add:
             if not nome_novo:
                 st.warning("O nome é obrigatório.")
+                st.stop()
+            
+            # 1. Verifica se o ID já existe para evitar erro feio do banco
+            check_query = text('SELECT count(*) FROM "Colaboradores" WHERE "ColaboradorID" = :id')
+            df_check = conn.query(check_query, params={"id": novo_id}, ttl=0)
+            
+            if df_check.iloc[0,0] > 0:
+                st.error(f"Erro: A matrícula {novo_id} já existe no sistema!")
             else:
+                # 2. Se não existe, prossegue com o cadastro
                 cargo_novo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == cargo_novo_nome]['CargoID'].iloc[0])
-                
                 try:
                     with conn.session as session:
-                        # Query de Insert
+                        # INSERT incluindo o ID manual
                         sql = text("""
-                            INSERT INTO "Colaboradores" ("Nome", "UnidadeID", "CargoID", "Ativo") 
-                            VALUES (:nome, :uid, :cid, TRUE)
+                            INSERT INTO "Colaboradores" ("ColaboradorID", "Nome", "UnidadeID", "CargoID", "Ativo") 
+                            VALUES (:id, :nome, :uid, :cid, TRUE)
                         """)
-                        session.execute(sql, {"nome": nome_novo, "uid": unidade_atual_id, "cid": cargo_novo_id})
+                        session.execute(sql, {"id": novo_id, "nome": nome_novo, "uid": unidade_atual_id, "cid": cargo_novo_id})
                         session.commit()
                     st.toast("Colaborador cadastrado com sucesso!", icon="✅")
                     st.rerun()
@@ -256,9 +276,9 @@ if st.session_state.get("authentication_status"):
 
                 st.divider()
                 st.markdown("#### 📊 Quadro de Vagas")
+                
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
-                
                 def style_escola(row):
                     styles = ['text-align: center;'] * 5
                     val = str(row['Diferenca'])
@@ -272,13 +292,14 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                # === ÁREA DE COLABORADORES COM BOTÃO DE ADICIONAR ===
-                col_tit, col_bt_add = st.columns([4, 1.2])
-                with col_tit: 
+                # === ÁREA DE COLABORADORES COM BOTÃO MINIMALISTA ===
+                # Usando colunas para jogar o botão para o cantinho
+                col_titulo, col_botao = st.columns([0.9, 0.1]) 
+                with col_titulo:
                     st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
-                with col_bt_add:
-                    # BOTÃO PARA ADICIONAR NOVO COLABORADOR NESTA ESCOLA
-                    if st.button("➕ Adicionar", key=f"add_btn_{unidade_id}"):
+                with col_botao:
+                    # BOTÃO MINIMALISTA
+                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
                         adicionar_colaborador(unidade_id, escola, df_cargos_all, conn)
 
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
