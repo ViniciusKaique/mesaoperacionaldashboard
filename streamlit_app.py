@@ -16,22 +16,19 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* Centralização de Tabelas */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
         text-align: center !important;
     }
 
-    /* Login Centralizado */
-    div.stButton > button { width: 100%; display: block; margin: 0 auto; }
-    
-    /* AJUSTE FINO PARA BOTÃO MINIMALISTA (O "+" fica pequeno) */
-    /* Afeta botões dentro de colunas muito estreitas */
-    div[data-testid="column"] button {
-        padding: 0.25rem 0.5rem;
-        line-height: 1.2;
+    /* Spinner Grande */
+    div[data-testid="stSpinner"] > div {
+        font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
     }
+
+    /* Botão Login */
+    div.stButton > button { width: 100%; display: block; margin: 0 auto; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,68 +58,57 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- DIALOG 1: EDITAR COLABORADOR ---
+# --- FUNÇÃO DE POPUP (DIALOG) PARA EDIÇÃO ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
-    st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
+    # colab_data: Dados da linha selecionada
+    # df_unidades_all: Lista de todas as escolas para o dropdown
+    # df_cargos_all: Lista de todos os cargos para o dropdown
+    
+    st.write(f"Editando: **{colab_data['Funcionario']}**")
+    
     with st.form("form_edicao"):
+        # 1. Dropdown de Escola (Pré-seleciona a atual)
         lista_escolas = df_unidades_all['NomeUnidade'].tolist()
+        # Tenta achar o index da escola atual, se não achar pega o 0
         try: idx_escola = lista_escolas.index(colab_data['Escola'])
         except: idx_escola = 0
-        nova_escola_nome = st.selectbox("🏫 Escola:", lista_escolas, index=idx_escola)
+        nova_escola_nome = st.selectbox("🏫 Transferir para Escola:", lista_escolas, index=idx_escola)
 
+        # 2. Dropdown de Cargo
         lista_cargos = df_cargos_all['NomeCargo'].tolist()
         try: idx_cargo = lista_cargos.index(colab_data['Cargo'])
         except: idx_cargo = 0
-        novo_cargo_nome = st.selectbox("💼 Cargo:", lista_cargos, index=idx_cargo)
+        novo_cargo_nome = st.selectbox("💼 Alterar Cargo:", lista_cargos, index=idx_cargo)
 
-        novo_status = st.checkbox("✅ Ativo?", value=True)
+        # 3. Status (Ativo/Inativo)
+        # Assume que se apareceu na lista é Ativo=True. Checkbox marcado = Ativo.
+        novo_status = st.checkbox("✅ Cadastro Ativo?", value=True)
+
+        # Botão de Salvar
+        submitted = st.form_submit_button("💾 Salvar Alterações")
         
-        if st.form_submit_button("💾 Salvar Alterações"):
+        if submitted:
+            # Busca os IDs baseados nos nomes selecionados
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
             
+            # Query de Update
+            sql = text("""
+                UPDATE "Colaboradores"
+                SET "UnidadeID" = :uid, "CargoID" = :cid, "Ativo" = :ativo
+                WHERE "ColaboradorID" = :id
+            """)
+            
             try:
                 with conn.session as session:
-                    session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
-                                    {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
+                    session.execute(sql, {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
-                st.toast("Atualizado!", icon="🎉"); st.rerun()
-            except Exception as e: st.error(f"Erro: {e}")
-
-# --- DIALOG 2: ADICIONAR COLABORADOR (ID MANUAL) ---
-@st.dialog("➕ Novo Colaborador")
-def adicionar_colaborador(unidade_atual_id, unidade_atual_nome, df_cargos_all, conn):
-    st.caption(f"Cadastrando na unidade: **{unidade_atual_nome}**")
-    
-    with st.form("form_add"):
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            novo_id = st.number_input("Matrícula (ID):", min_value=1, step=1, format="%d")
-        with c2:
-            nome_novo = st.text_input("Nome Completo:")
-        
-        cargo_novo_nome = st.selectbox("Cargo:", df_cargos_all['NomeCargo'].tolist())
-        
-        if st.form_submit_button("💾 Cadastrar"):
-            if not nome_novo:
-                st.warning("Nome é obrigatório.")
-                st.stop()
-            
-            # VERIFICA SE ID JÁ EXISTE
-            res = conn.query(f'SELECT count(*) FROM "Colaboradores" WHERE "ColaboradorID" = {novo_id}', ttl=0)
-            if res.iloc[0,0] > 0:
-                st.error(f"Erro: O ID {novo_id} já existe!")
-            else:
-                cargo_novo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == cargo_novo_nome]['CargoID'].iloc[0])
-                try:
-                    with conn.session as session:
-                        sql = text("INSERT INTO \"Colaboradores\" (\"ColaboradorID\", \"Nome\", \"UnidadeID\", \"CargoID\", \"Ativo\") VALUES (:id, :nome, :uid, :cid, TRUE)")
-                        session.execute(sql, {"id": novo_id, "nome": nome_novo, "uid": unidade_atual_id, "cid": cargo_novo_id})
-                        session.commit()
-                    st.toast("Cadastrado!", icon="✅"); st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
+                st.toast("Colaborador atualizado com sucesso!", icon="🎉")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")
 
 # --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
@@ -134,11 +120,12 @@ if st.session_state.get("authentication_status"):
     try:
         conn = st.connection("postgres", type="sql")
 
-        # Dados Auxiliares para os Dropdowns
-        df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
-        df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
+        # --- CARREGAR DADOS AUXILIARES PARA OS DROPDOWNS ---
+        # Precisamos disso para preencher as opções do formulário de edição
+        df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600)
+        df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600)
 
-        # Queries Principais
+        # --- QUERIES PRINCIPAIS ---
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
@@ -161,10 +148,11 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
+        # Carregamento silencioso
         df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
-        # Processamento
+        # --- PROCESSAMENTO ---
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
@@ -259,6 +247,7 @@ if st.session_state.get("authentication_status"):
                 st.divider()
                 st.markdown("#### 📊 Quadro de Vagas")
                 
+                # Tabela de Resumo
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
                 
@@ -275,23 +264,30 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                # === LISTA DE COLABORADORES (BOTÃO MINIMALISTA) ===
-                # A mágica do layout minimalista: Coluna 1 (Texto) Grande | Coluna 2 (Botão) Pequena
-                col_txt, col_add = st.columns([0.92, 0.08]) 
-                with col_txt:
-                    st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
-                with col_add:
-                    # Botão pequeno somente com o ícone
-                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Novo Colaborador"):
-                        adicionar_colaborador(unidade_id, escola, df_cargos_all, conn)
-
+                # === LISTA DE COLABORADORES INTERATIVA ===
+                st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
                 if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False) | p_show['ID'].astype(str).str.contains(termo_busca)]
                 
                 if not p_show.empty:
-                    event = st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
+                    # --- INTERATIVIDADE AQUI ---
+                    # on_select="rerun" faz a página recarregar quando clica na linha
+                    event = st.dataframe(
+                        p_show[['ID','Funcionario','Cargo']], 
+                        use_container_width=True, 
+                        hide_index=True,
+                        on_select="rerun",
+                        selection_mode="single-row",
+                        key=f"grid_{unidade_id}" 
+                    )
+                    
+                    # Se uma linha foi selecionada, abre o Dialog
                     if len(event.selection.rows) > 0:
-                        editar_colaborador(p_show.iloc[event.selection.rows[0]], df_unidades_all, df_cargos_all, conn)
+                        idx_selecionado = event.selection.rows[0]
+                        dados_colaborador = p_show.iloc[idx_selecionado]
+                        
+                        # Chama a função de popup (dialog) criada lá em cima
+                        editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
                 else:
                     st.warning("Nenhum colaborador encontrado.")
 
