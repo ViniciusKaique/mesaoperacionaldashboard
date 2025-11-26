@@ -3,6 +3,7 @@ import streamlit_authenticator as stauth
 import pandas as pd
 import plotly.express as px
 from PIL import Image
+from sqlalchemy import text # Adicionei apenas esta importação necessária para salvar no banco
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
@@ -91,12 +92,13 @@ if st.session_state.get("authentication_status"):
         conn = st.connection("postgres", type="sql")
 
         # --- QUERIES ---
-        # AJUSTE: Pegando a DataConferencia da tabela UNIDADES (u)
+        # Trazemos o UnidadeID e DataConferencia para poder exibir e editar
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
+            u."UnidadeID",
             u."NomeUnidade" AS "Escola",
-            u."DataConferencia",  -- Data vinda da tabela Unidades
+            u."DataConferencia",
             s."NomeSupervisor" AS "Supervisor", 
             c."NomeCargo" AS "Cargo",
             q."Quantidade" AS "Edital",
@@ -122,7 +124,7 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # --- CARREGAMENTO ---
+        # --- CARREGAMENTO SILENCIOSO ---
         df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
@@ -130,7 +132,6 @@ if st.session_state.get("authentication_status"):
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         
-        # Converte data para datetime
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
 
         def define_status(row):
@@ -207,7 +208,7 @@ if st.session_state.get("authentication_status"):
 
         st.markdown("---")
 
-        # === APLICAÇÃO FILTROS ===
+        # === APLICAÇÃO DOS FILTROS ===
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
@@ -237,16 +238,18 @@ if st.session_state.get("authentication_status"):
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
             
-            # Pega supervisor
+            # Pega dados para o cabeçalho
             nome_supervisor = df_e['Supervisor'].iloc[0] if not df_e.empty else "N/A"
+            unidade_id = int(df_e['UnidadeID'].iloc[0])
+            data_atual = df_e['DataConferencia'].iloc[0]
             
-            # Pega data de conferência
-            raw_date = df_e['DataConferencia'].iloc[0]
-            if pd.isnull(raw_date):
-                str_data = '<span style="color:#ff4b4b; font-weight:bold;">Pendente ⚠️</span>'
+            # Configura texto do botão
+            if pd.isnull(data_atual):
+                label_botao = "⚠️ Pendente"
+                val_inicial = pd.Timestamp.today()
             else:
-                fmt = raw_date.strftime('%d/%m/%Y')
-                str_data = f'<span style="color:#00c853; font-weight:bold;">{fmt} ✅</span>'
+                label_botao = f"📅 Conferido: {data_atual.strftime('%d/%m/%Y')}"
+                val_inicial = data_atual
 
             icon = "🏫"
             if "FALTA" in status_list: icon = "🔴"
@@ -254,14 +257,26 @@ if st.session_state.get("authentication_status"):
             elif "OK" in status_list and len(set(status_list)) == 1: icon = "✅"
 
             with st.expander(f"{icon} {escola}", expanded=False):
-                # MOSTRA SUPERVISOR E DATA NO TOPO DO DETALHE
-                st.markdown(f"""
-                <div style='background-color: #262730; padding: 10px; border-radius: 5px; margin-bottom: 10px; border: 1px solid #404040;'>
-                    <b>👨‍💼 Supervisor:</b> {nome_supervisor} &nbsp;&nbsp;|&nbsp;&nbsp; 
-                    <b>📅 Conferência:</b> {str_data}
-                </div>
-                """, unsafe_allow_html=True)
                 
+                # === CABEÇALHO PERSONALIZADO COM BOTÃO ===
+                c_sup, c_btn = st.columns([3, 1.5])
+                with c_sup:
+                    st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
+                with c_btn:
+                    # O botão Popover fica aqui do lado direito
+                    with st.popover(label_botao, use_container_width=True):
+                        st.markdown("Alterar data de conferência")
+                        nova_data = st.date_input("Nova Data:", value=val_inicial, format="DD/MM/YYYY", key=f"dt_{unidade_id}")
+                        
+                        if st.button("💾 Salvar", key=f"save_{unidade_id}"):
+                            with conn.session as session:
+                                session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
+                                session.commit()
+                            st.toast("Data atualizada com sucesso!", icon="✅")
+                            st.rerun()
+
+                st.divider()
+
                 st.markdown("#### 📊 Quadro de Vagas")
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
@@ -270,9 +285,9 @@ if st.session_state.get("authentication_status"):
                     styles = ['text-align: center;'] * 5
                     val = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
-                    if '-' in val: styles[3] = base + 'color: #ff4b4b;' 
-                    elif '+' in val: styles[3] = base + 'color: #29b6f6;' 
-                    else: styles[3] = base + 'color: #00c853;' 
+                    if '-' in val: styles[3] = base + 'color: #ff4b4b;'
+                    elif '+' in val: styles[3] = base + 'color: #29b6f6;'
+                    else: styles[3] = base + 'color: #00c853;'
                     
                     stt = str(row['Status'])
                     if '🔴' in stt: styles[4] = base + 'color: #ff4b4b;'
