@@ -15,7 +15,7 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* Centralização Geral de Tabelas */
+    /* Centralização de Tabelas */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
@@ -65,48 +65,32 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-# --- TELA DE LOGIN (SEM LOGO) ---
+# --- TELA DE LOGIN ---
 if not st.session_state.get("authentication_status"):
-    
-    st.write("")
-    st.write("")
-    st.write("")
-    st.write("")
-    st.write("")
-    
+    st.write(""); st.write(""); st.write(""); st.write(""); st.write("")
     col_esq, col_centro, col_dir = st.columns([3, 2, 3])
-    
     with col_centro:
-        try: 
-            authenticator.login(location='main')
-        except: 
-            authenticator.login()
-    
+        try: authenticator.login(location='main')
+        except: authenticator.login()
     if st.session_state.get("authentication_status") is False:
-        with col_centro: 
-            st.error('Usuário ou senha incorretos')
+        with col_centro: st.error('Usuário ou senha incorretos')
 
 # --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
     name = st.session_state.get("name")
     
-    # --- SIDEBAR ---
     with st.sidebar:
         if logo := carregar_logo(): 
-            st.image(logo, use_container_width=True) 
-            st.divider()
-            
+            st.image(logo, use_container_width=True); st.divider()
         st.write(f"👤 **{name}**")
         authenticator.logout(location='sidebar')
         st.divider()
         st.info("Painel Gerencial + Detalhe")
 
     try:
-        # --- CONEXÃO ---
         conn = st.connection("postgres", type="sql")
 
-        # --- QUERIES ---
-        # A query_resumo JÁ traz a coluna "Supervisor", então não precisamos mexer no SQL
+        # --- QUERIES (ATUALIZADA COM A NOVA COLUNA) ---
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
@@ -114,6 +98,7 @@ if st.session_state.get("authentication_status"):
             s."NomeSupervisor" AS "Supervisor", 
             c."NomeCargo" AS "Cargo",
             q."Quantidade" AS "Edital",
+            q."DataConferencia",  -- ADICIONADO AQUI
             (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
         FROM "QuadroEdital" q
         JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
@@ -143,6 +128,11 @@ if st.session_state.get("authentication_status"):
         # --- PROCESSAMENTO ---
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
+
+        # FORMATAÇÃO DA DATA (DD/MM/AAAA)
+        # Converte para datetime e depois formata. Se for nulo, coloca um traço "-"
+        df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
+        df_resumo['Conferido'] = df_resumo['DataConferencia'].dt.strftime('%d/%m/%Y').fillna('-')
 
         def define_status(row):
             diff = row['Diferenca_num']
@@ -188,7 +178,6 @@ if st.session_state.get("authentication_status"):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
-                    
                     if '-' in val: styles[3] = base + 'color: #ff4b4b;' 
                     elif '+' in val: styles[3] = base + 'color: #29b6f6;' 
                     else: styles[3] = base + 'color: #00c853;' 
@@ -199,20 +188,14 @@ if st.session_state.get("authentication_status"):
         st.markdown("---")
         st.subheader("🏫 Detalhe por Escola")
 
-        # --- FILTROS (AGORA COM SUPERVISOR) ---
-        st.markdown("##### 🛠️ Filtro de Diagnóstico")
-        # Dividi em 3 colunas para caber o Supervisor
+        # --- FILTROS ---
         col_f1, col_f2, col_f3 = st.columns([1.2, 1.2, 1])
-        
         with col_f1: 
             lista_escolas = ["Todas"] + sorted(list(df_resumo['Escola'].unique()))
             filtro_escola = st.selectbox("🔍 Escola:", lista_escolas)
-        
         with col_f2:
-            # LISTA DE SUPERVISORES UNICOS
             lista_supervisores = ["Todos"] + sorted(list(df_resumo['Supervisor'].unique()))
             filtro_supervisor = st.selectbox("👔 Supervisor:", lista_supervisores)
-
         with col_f3: 
             termo_busca = st.text_input("👤 Buscar Colaborador:", "")
 
@@ -225,16 +208,11 @@ if st.session_state.get("authentication_status"):
 
         st.markdown("---")
 
-        # === APLICAÇÃO DOS FILTROS ===
+        # === APLICAÇÃO FILTROS ===
         mask = pd.Series([True] * len(df_resumo))
-        
-        # 1. Filtro Escola
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
-        
-        # 2. Filtro Supervisor (NOVO)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
 
-        # 3. Filtro Complexo (Status por Cargo)
         if filtro_comb:
             escolas_validas = []
             for escola in df_resumo['Escola'].unique():
@@ -247,7 +225,6 @@ if st.session_state.get("authentication_status"):
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
         
-        # 4. Filtro Busca (Nome/ID)
         if termo_busca:
             match = df_pessoas[df_pessoas['Funcionario'].astype(str).str.contains(termo_busca, case=False) | 
                                df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
@@ -260,8 +237,6 @@ if st.session_state.get("authentication_status"):
         for escola in df_final['Escola'].unique():
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
-            
-            # Pega o nome do supervisor dessa escola (pega o primeiro registro, já que é igual para a escola toda)
             nome_supervisor = df_e['Supervisor'].iloc[0] if not df_e.empty else "N/A"
 
             icon = "🏫"
@@ -270,25 +245,30 @@ if st.session_state.get("authentication_status"):
             elif "OK" in status_list and len(set(status_list)) == 1: icon = "✅"
 
             with st.expander(f"{icon} {escola}", expanded=False):
-                # AQUI: Exibe o nome do Supervisor em destaque
                 st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
-                
                 st.markdown("#### 📊 Quadro de Vagas")
-                d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
+                
+                # ADICIONADO A COLUNA 'Conferido' NO DISPLAY
+                d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display', 'Conferido']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
 
                 def style_escola(row):
-                    styles = ['text-align: center;'] * 5
+                    # Agora são 6 colunas (adicionei Conferido)
+                    styles = ['text-align: center;'] * 6 
+                    
+                    # Coluna Diferenca (index 3)
                     val = str(row['Diferenca'])
                     base = 'text-align: center; font-weight: bold;'
                     if '-' in val: styles[3] = base + 'color: #ff4b4b;'
                     elif '+' in val: styles[3] = base + 'color: #29b6f6;'
                     else: styles[3] = base + 'color: #00c853;'
                     
+                    # Coluna Status (index 4)
                     stt = str(row['Status'])
                     if '🔴' in stt: styles[4] = base + 'color: #ff4b4b;'
                     elif '🔵' in stt: styles[4] = base + 'color: #29b6f6;'
                     else: styles[4] = base + 'color: #00c853;'
+                    
                     return styles
 
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
