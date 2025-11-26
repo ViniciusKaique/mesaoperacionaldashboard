@@ -3,12 +3,12 @@ import streamlit_authenticator as stauth
 import pandas as pd
 import plotly.express as px
 from PIL import Image
-from sqlalchemy import text # Necessário para o UPDATE no banco
+from sqlalchemy import text # Necessário para o UPDATE
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
 
-# --- CSS PERSONALIZADO (VISUAL FINAL) ---
+# --- CSS PERSONALIZADO ---
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; }
@@ -16,33 +16,24 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* 1. Centralização de Tabelas */
+    /* Centralização de Tabelas */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
         text-align: center !important;
     }
 
-    /* 2. Spinner de Carregamento (Grande, Vermelho e Sem Quebra de Linha) */
-    div[data-testid="stSpinner"] {
-        text-align: center;
-        align-items: center;
-        justify-content: center;
-    }
-    div[data-testid="stSpinner"] > div {
-        font-size: 28px !important;    
-        font-weight: bold !important;  
-        color: #ff4b4b !important;     
-        text-align: center !important; 
-        line-height: 1.5 !important;
-        white-space: nowrap;           /* Segredo para não repetir o texto */
-    }
-
-    /* 3. Centralizar Botão de Login */
+    /* Centralizar Botão de Login */
     div.stButton > button {
         width: 100%;
         display: block;
         margin: 0 auto;
+    }
+    
+    /* Centralizar Imagens (Logo Sidebar) */
+    div[data-testid="stImage"] {
+        display: flex;
+        justify-content: center;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -51,7 +42,7 @@ def carregar_logo():
     try: return Image.open("logo.png")
     except: return None
 
-# --- AUTH CONFIG (VIA SECRETS) ---
+# --- AUTH CONFIG ---
 try:
     auth_secrets = st.secrets["auth"]
     config = {
@@ -81,29 +72,16 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-# --- TELA DE LOGIN (LIMPA E CENTRALIZADA) ---
+# --- TELA DE LOGIN (LIMPA) ---
 if not st.session_state.get("authentication_status"):
-    
-    # Espaçamento vertical
-    st.write("")
-    st.write("")
-    st.write("")
-    st.write("")
-    st.write("")
-    
-    # Colunas para centralizar o bloco de login
+    st.write(""); st.write(""); st.write(""); st.write(""); st.write("")
     col_esq, col_centro, col_dir = st.columns([3, 2, 3])
-    
     with col_centro:
-        # Sem logo aqui, conforme solicitado
-        try: 
-            authenticator.login(location='main')
-        except: 
-            authenticator.login()
+        try: authenticator.login(location='main')
+        except: authenticator.login()
     
     if st.session_state.get("authentication_status") is False:
-        with col_centro: 
-            st.error('Usuário ou senha incorretos')
+        with col_centro: st.error('Usuário ou senha incorretos')
 
 # --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
@@ -114,7 +92,6 @@ if st.session_state.get("authentication_status"):
         if logo := carregar_logo(): 
             st.image(logo, use_container_width=True) 
             st.divider()
-            
         st.write(f"👤 **{name}**")
         authenticator.logout(location='sidebar')
         st.divider()
@@ -125,7 +102,7 @@ if st.session_state.get("authentication_status"):
         conn = st.connection("postgres", type="sql")
 
         # --- QUERIES ---
-        # Importante: Puxando UnidadeID e DataConferencia da tabela Unidades
+        # Adicionado UnidadeID e DataConferencia para a lógica de update
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo",
@@ -157,16 +134,15 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # --- CARREGAMENTO PERSONALIZADO ---
-        with st.spinner("🕵️‍♂️ Consultando os registros de cada escola... Aguarde! 🔍"):
-            df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
-            df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
+        # --- CARREGAMENTO SILENCIOSO (show_spinner=False) ---
+        df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
+        df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
         # --- PROCESSAMENTO ---
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         
-        # Converter Data
+        # Garante datetime
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
 
         def define_status(row):
@@ -285,12 +261,13 @@ if st.session_state.get("authentication_status"):
 
             with st.expander(f"{icon} {escola}", expanded=False):
                 
-                # CABEÇALHO COM POPOVER PARA DATA
+                # === CABEÇALHO COM DATA EDITÁVEL (POPOVER) ===
                 c_sup, c_data = st.columns([3, 1.5])
                 with c_sup:
                     st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
+                
                 with c_data:
-                    # Lógica do Botão/Data
+                    # Configuração do Rótulo do Botão
                     if pd.isnull(data_atual):
                         label_botao = "⚠️ Pendente"
                         val_inicial = pd.Timestamp.today()
@@ -298,9 +275,9 @@ if st.session_state.get("authentication_status"):
                         label_botao = f"📅 {data_atual.strftime('%d/%m/%Y')}"
                         val_inicial = data_atual
 
-                    # Popover para edição
+                    # Popover que contém o calendário e botão de salvar
                     with st.popover(label_botao, use_container_width=True):
-                        st.markdown("Atualizar Data")
+                        st.markdown("Alterar Data de Conferência")
                         nova_data = st.date_input(
                             "Selecione:", 
                             value=val_inicial, 
@@ -308,17 +285,17 @@ if st.session_state.get("authentication_status"):
                             key=f"dt_{unidade_id}"
                         )
                         
+                        # Lógica de Update no Banco
                         if nova_data:
-                            # Só mostra botão de salvar se a data for diferente ou se estava vazio
+                            # Verifica se mudou algo para habilitar o botão
                             data_mudou = pd.isnull(data_atual) or (nova_data != data_atual.date())
                             
                             if data_mudou:
-                                if st.button("Salvar", key=f"save_{unidade_id}"):
+                                if st.button("Salvar Nova Data", key=f"save_{unidade_id}"):
                                     with conn.session as session:
-                                        # Atualiza no Banco
                                         session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
                                         session.commit()
-                                    st.toast("Data Atualizada!", icon="✅")
+                                    st.toast(f"Data da escola {escola} atualizada!", icon="✅")
                                     st.rerun()
 
                 st.divider()
