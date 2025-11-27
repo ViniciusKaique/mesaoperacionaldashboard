@@ -1,7 +1,8 @@
 streamlit
-streamlit-authenticator
+streamlit-authenticator>=0.3.3
+extra-streamlit-components>=0.1.71
 pandas
 plotly
-psycopg2-binary
-SQLAlchemy
 Pillow
+SQLAlchemy
+psycopg2-binary

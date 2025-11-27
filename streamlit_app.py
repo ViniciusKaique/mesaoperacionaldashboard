@@ -1,9 +1,10 @@
-import streamlit as st 
+import streamlit as st
 import streamlit_authenticator as stauth
 import pandas as pd
 import plotly.express as px
 from PIL import Image
 from sqlalchemy import text
+import time
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
@@ -27,7 +28,7 @@ st.markdown("""
         font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
     }
 
-    /* Botão Login */
+    /* Botão Login Centralizado */
     div.stButton > button { width: 100%; display: block; margin: 0 auto; }
 </style>
 """, unsafe_allow_html=True)
@@ -39,62 +40,77 @@ def carregar_logo():
 # --- AUTH CONFIG ---
 try:
     auth_secrets = st.secrets["auth"]
+    # Estrutura ajustada para garantir compatibilidade
     config = {
-        'credentials': {'usernames': {auth_secrets["username"]: {'name': auth_secrets["name"], 'password': auth_secrets["password_hash"], 'email': auth_secrets["email"]}}},
-        'cookie': {'name': auth_secrets["cookie_name"], 'key': auth_secrets["cookie_key"], 'expiry_days': auth_secrets["cookie_expiry_days"]}
+        'credentials': {
+            'usernames': {
+                auth_secrets["username"]: {
+                    'name': auth_secrets["name"], 
+                    'password': auth_secrets["password_hash"], 
+                    'email': auth_secrets["email"]
+                }
+            }
+        },
+        'cookie': {
+            'name': auth_secrets["cookie_name"], 
+            'key': auth_secrets["cookie_key"], 
+            'expiry_days': auth_secrets["cookie_expiry_days"]
+        }
     }
 except Exception as e:
-    st.error("Erro Crítico: Secrets não configurados."); st.stop()
+    st.error(f"Erro Crítico: Secrets não configurados ou incorretos. Detalhe: {e}")
+    st.stop()
 
-authenticator = stauth.Authenticate(config['credentials'], config['cookie']['name'], config['cookie']['key'], config['cookie']['expiry_days'])
+# Inicialização do Authenticator
+authenticator = stauth.Authenticate(
+    config['credentials'],
+    config['cookie']['name'],
+    config['cookie']['key'],
+    config['cookie']['expiry_days']
+)
 
-# --- LOGIN ---
-if not st.session_state.get("authentication_status"):
-    st.write(""); st.write(""); st.write(""); st.write(""); st.write("")
-    col_esq, col_centro, col_dir = st.columns([3, 2, 3])
-    with col_centro:
-        try: authenticator.login(location='main')
-        except: authenticator.login()
-    if st.session_state.get("authentication_status") is False:
-        with col_centro: st.error('Usuário ou senha incorretos')
+# --- LOGIN LÓGICA (Versão Atualizada) ---
+# Na versão nova, o login retorna os status diretamente e cria a UI
+try:
+    # Tenta renderizar o login. Se falhar, usa a versão sem argumentos (dependendo da versão instalada)
+    authenticator.login('main')
+except Exception:
+    try:
+        authenticator.login()
+    except Exception as e:
+        st.error(f"Erro no componente de login: {e}")
+
+# Verifica o status na sessão
+if st.session_state.get("authentication_status") is False:
+    st.error('Usuário ou senha incorretos')
+elif st.session_state.get("authentication_status") is None:
+    st.warning('Por favor, faça o login.')
 
 # --- FUNÇÃO DE POPUP (DIALOG) PARA EDIÇÃO ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
-    # colab_data: Dados da linha selecionada
-    # df_unidades_all: Lista de todas as escolas para o dropdown
-    # df_cargos_all: Lista de todos os cargos para o dropdown
-    
     st.write(f"Editando: **{colab_data['Funcionario']}**")
     
     with st.form("form_edicao"):
-        # 1. Dropdown de Escola (Pré-seleciona a atual)
         lista_escolas = df_unidades_all['NomeUnidade'].tolist()
-        # Tenta achar o index da escola atual, se não achar pega o 0
         try: idx_escola = lista_escolas.index(colab_data['Escola'])
         except: idx_escola = 0
         nova_escola_nome = st.selectbox("🏫 Transferir para Escola:", lista_escolas, index=idx_escola)
 
-        # 2. Dropdown de Cargo
         lista_cargos = df_cargos_all['NomeCargo'].tolist()
         try: idx_cargo = lista_cargos.index(colab_data['Cargo'])
         except: idx_cargo = 0
         novo_cargo_nome = st.selectbox("💼 Alterar Cargo:", lista_cargos, index=idx_cargo)
 
-        # 3. Status (Ativo/Inativo)
-        # Assume que se apareceu na lista é Ativo=True. Checkbox marcado = Ativo.
         novo_status = st.checkbox("✅ Cadastro Ativo?", value=True)
 
-        # Botão de Salvar
         submitted = st.form_submit_button("💾 Salvar Alterações")
         
         if submitted:
-            # Busca os IDs baseados nos nomes selecionados
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
             
-            # Query de Update
             sql = text("""
                 UPDATE "Colaboradores"
                 SET "UnidadeID" = :uid, "CargoID" = :cid, "Ativo" = :ativo
@@ -106,26 +122,34 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                     session.execute(sql, {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
                 st.toast("Colaborador atualizado com sucesso!", icon="🎉")
+                time.sleep(1) # Dá tempo de ver o toast
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro ao salvar: {e}")
 
-# --- SISTEMA PRINCIPAL ---
+# --- SISTEMA PRINCIPAL (Só roda se logado) ---
 if st.session_state.get("authentication_status"):
+    
+    # 1. Sidebar e Logout
     name = st.session_state.get("name")
     with st.sidebar:
-        if logo := carregar_logo(): st.image(logo, use_container_width=True); st.divider()
-        st.write(f"👤 **{name}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Painel Gerencial + Detalhe")
+        if logo := carregar_logo(): 
+            st.image(logo, use_container_width=True)
+            st.divider()
+        st.write(f"👤 **{name}**")
+        authenticator.logout('Logout', 'sidebar') # Sintaxe atualizada
+        st.divider()
+        st.info("Painel Gerencial + Detalhe")
 
+    # 2. Conexão e Dados (Protegido dentro do IF para não carregar antes do login)
     try:
         conn = st.connection("postgres", type="sql")
 
-        # --- CARREGAR DADOS AUXILIARES PARA OS DROPDOWNS ---
-        # Precisamos disso para preencher as opções do formulário de edição
+        # Dados auxiliares
         df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600)
         df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600)
 
-        # --- QUERIES PRINCIPAIS ---
+        # Queries principais
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
@@ -148,24 +172,24 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # Carregamento silencioso
         df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
-        # --- PROCESSAMENTO ---
+        # Processamento
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
 
         def define_status(row):
-            diff = row['Diferenca_num']; 
+            diff = row['Diferenca_num']
             if diff < 0: return '🔴 FALTA'
             elif diff > 0: return '🔵 EXCEDENTE'
             return '🟢 OK'
+        
         df_resumo['Status_display'] = df_resumo.apply(define_status, axis=1)
         df_resumo['Status'] = df_resumo['Status_display'].apply(lambda x: x.split(' ')[1])
 
-        # === DASHBOARD ===
+        # === DASHBOARD UI ===
         st.title("📊 Mesa Operacional")
         c1, c2, c3 = st.columns(3)
         with c1: st.markdown("**<div style='font-size:18px'>📋 Total Edital</div>**", unsafe_allow_html=True); st.metric("", int(df_resumo['Edital'].sum()))
@@ -176,8 +200,15 @@ if st.session_state.get("authentication_status"):
         with st.expander("📈 Ver Gráficos e Resumo Geral", expanded=True):
             df_por_cargo = df_resumo.groupby('Cargo')[['Edital','Real']].sum().reset_index()
             df_por_cargo['Diferenca_display'] = (df_por_cargo['Real'] - df_por_cargo['Edital']).apply(lambda x: f"+{x}" if x > 0 else str(x))
+            
             col_g1, col_g2 = st.columns([2,1])
-            with col_g1: st.plotly_chart(px.bar(df_por_cargo.melt(id_vars=['Cargo'], value_vars=['Edital','Real'], var_name='Tipo', value_name='Quantidade'), x='Cargo', y='Quantidade', color='Tipo', barmode='group', color_discrete_map={'Edital': '#808080','Real': '#00bfff'}, text_auto=True, template="seaborn"), use_container_width=True)
+            with col_g1: 
+                fig = px.bar(df_por_cargo.melt(id_vars=['Cargo'], value_vars=['Edital','Real'], var_name='Tipo', value_name='Quantidade'), 
+                             x='Cargo', y='Quantidade', color='Tipo', barmode='group', 
+                             color_discrete_map={'Edital': '#808080','Real': '#00bfff'}, 
+                             text_auto=True, template="seaborn")
+                st.plotly_chart(fig, use_container_width=True)
+            
             with col_g2: 
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
@@ -200,7 +231,7 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
-        # Filtros
+        # Filtros Lógica
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
@@ -247,7 +278,6 @@ if st.session_state.get("authentication_status"):
                 st.divider()
                 st.markdown("#### 📊 Quadro de Vagas")
                 
-                # Tabela de Resumo
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
                 d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
                 
@@ -264,14 +294,12 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                # === LISTA DE COLABORADORES INTERATIVA ===
+                # === COLABORADORES ===
                 st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
                 if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False) | p_show['ID'].astype(str).str.contains(termo_busca)]
                 
                 if not p_show.empty:
-                    # --- INTERATIVIDADE AQUI ---
-                    # on_select="rerun" faz a página recarregar quando clica na linha
                     event = st.dataframe(
                         p_show[['ID','Funcionario','Cargo']], 
                         use_container_width=True, 
@@ -281,12 +309,9 @@ if st.session_state.get("authentication_status"):
                         key=f"grid_{unidade_id}" 
                     )
                     
-                    # Se uma linha foi selecionada, abre o Dialog
                     if len(event.selection.rows) > 0:
                         idx_selecionado = event.selection.rows[0]
                         dados_colaborador = p_show.iloc[idx_selecionado]
-                        
-                        # Chama a função de popup (dialog) criada lá em cima
                         editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
                 else:
                     st.warning("Nenhum colaborador encontrado.")
