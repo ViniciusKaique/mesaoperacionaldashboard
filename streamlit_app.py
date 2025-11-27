@@ -40,7 +40,6 @@ def carregar_logo():
 # --- AUTH CONFIG ---
 try:
     auth_secrets = st.secrets["auth"]
-    # Estrutura ajustada para garantir compatibilidade
     config = {
         'credentials': {
             'usernames': {
@@ -58,10 +57,9 @@ try:
         }
     }
 except Exception as e:
-    st.error(f"Erro Crítico: Secrets não configurados ou incorretos. Detalhe: {e}")
+    st.error(f"Erro Crítico: Secrets não configurados. {e}")
     st.stop()
 
-# Inicialização do Authenticator
 authenticator = stauth.Authenticate(
     config['credentials'],
     config['cookie']['name'],
@@ -69,18 +67,13 @@ authenticator = stauth.Authenticate(
     config['cookie']['expiry_days']
 )
 
-# --- LOGIN LÓGICA (Versão Atualizada) ---
-# Na versão nova, o login retorna os status diretamente e cria a UI
+# --- LOGIN LÓGICA ---
 try:
-    # Tenta renderizar o login. Se falhar, usa a versão sem argumentos (dependendo da versão instalada)
     authenticator.login('main')
 except Exception:
-    try:
-        authenticator.login()
-    except Exception as e:
-        st.error(f"Erro no componente de login: {e}")
+    try: authenticator.login()
+    except: pass
 
-# Verifica o status na sessão
 if st.session_state.get("authentication_status") is False:
     st.error('Usuário ou senha incorretos')
 elif st.session_state.get("authentication_status") is None:
@@ -122,34 +115,31 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                     session.execute(sql, {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
                 st.toast("Colaborador atualizado com sucesso!", icon="🎉")
-                time.sleep(1) # Dá tempo de ver o toast
+                time.sleep(1)
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro ao salvar: {e}")
 
-# --- SISTEMA PRINCIPAL (Só roda se logado) ---
+# --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
     
-    # 1. Sidebar e Logout
     name = st.session_state.get("name")
     with st.sidebar:
         if logo := carregar_logo(): 
             st.image(logo, use_container_width=True)
             st.divider()
         st.write(f"👤 **{name}**")
-        authenticator.logout('Logout', 'sidebar') # Sintaxe atualizada
+        authenticator.logout('Logout', 'sidebar')
         st.divider()
         st.info("Painel Gerencial + Detalhe")
 
-    # 2. Conexão e Dados (Protegido dentro do IF para não carregar antes do login)
     try:
         conn = st.connection("postgres", type="sql")
 
-        # Dados auxiliares
-        df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600)
-        df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600)
+        # --- AQUI ESTAVA O PROBLEMA: ADICIONADO show_spinner=False ---
+        df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
+        df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
 
-        # Queries principais
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
@@ -172,6 +162,7 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
+        # Mantendo show_spinner=False aqui também
         df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
 
@@ -231,7 +222,7 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
-        # Filtros Lógica
+        # Filtros
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
