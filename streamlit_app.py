@@ -56,7 +56,7 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- DIALOGS ---
+# --- FUNÇÃO: EDITAR COLABORADOR ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
     st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
@@ -72,10 +72,13 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
         novo_cargo_nome = st.selectbox("💼 Cargo:", lista_cargos, index=idx_cargo)
 
         novo_status = st.checkbox("✅ Ativo?", value=True)
-        if st.form_submit_button("💾 Salvar Alterações"):
+        submitted = st.form_submit_button("💾 Salvar Alterações")
+        
+        if submitted:
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
+            
             try:
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
@@ -98,7 +101,7 @@ if st.session_state.get("authentication_status"):
         df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
         df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
 
-        # Queries
+        # Queries Principais
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
@@ -111,6 +114,7 @@ if st.session_state.get("authentication_status"):
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         ORDER BY u."NomeUnidade", c."NomeCargo";
         """
+
         query_funcionarios = """
         SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
         FROM "Colaboradores" col
@@ -176,33 +180,18 @@ if st.session_state.get("authentication_status"):
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
-        # === LÓGICA DE FILTRAGEM DE STATUS CORRIGIDA ===
+        # Lógica Ajuste
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
-                
-                # Dados para cálculo
-                total_edital_e = df_e['Edital'].sum()
-                total_real_e = df_e['Real'].sum()
-                saldo_e = total_real_e - total_edital_e
+                total_edital_e = df_e['Edital'].sum(); total_real_e = df_e['Real'].sum(); saldo_e = total_real_e - total_edital_e
                 status_list = df_e['Status'].tolist()
-                
-                # Hierarquia da Classificação (AJUSTE tem prioridade sobre FALTA se o saldo for 0)
                 status_escola = "🟢 OK"
-                
-                # 1. Se saldo zerado MAS tem coisas erradas dentro (Falta e sobra) -> AJUSTE
-                if saldo_e == 0 and any(s != 'OK' for s in status_list):
-                    status_escola = "🟡 AJUSTE"
-                # 2. Se falta gente no total ou tem cargo negativo -> FALTA
-                elif "FALTA" in status_list:
-                    status_escola = "🔴 FALTA"
-                # 3. Se sobra gente -> EXCEDENTE
-                elif "EXCEDENTE" in status_list:
-                    status_escola = "🔵 EXCEDENTE"
-                
-                if status_escola == filtro_situacao:
-                    escolas_filtro_status.append(escola)
+                if saldo_e == 0 and any(s != 'OK' for s in status_list): status_escola = "🟡 AJUSTE"
+                elif "FALTA" in status_list: status_escola = "🔴 FALTA"
+                elif "EXCEDENTE" in status_list: status_escola = "🔵 EXCEDENTE"
+                if status_escola == filtro_situacao: escolas_filtro_status.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_filtro_status)
 
         if filtro_comb:
@@ -220,27 +209,52 @@ if st.session_state.get("authentication_status"):
             mask &= df_resumo['Escola'].isin(match)
 
         df_final = df_resumo[mask]
-        st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
+        
+        # --- PAGINAÇÃO (OTIMIZAÇÃO) ---
+        ITEMS_PER_PAGE = 50
+        all_schools = df_final['Escola'].unique()
+        
+        # Inicializa estado da página
+        if 'page_number' not in st.session_state: st.session_state.page_number = 0
+        
+        # Reseta página se mudar filtro
+        if 'last_schools_count' not in st.session_state: st.session_state.last_schools_count = len(all_schools)
+        if len(all_schools) != st.session_state.last_schools_count:
+            st.session_state.page_number = 0
+            st.session_state.last_schools_count = len(all_schools)
+
+        # Cálculo de fatiamento
+        total_pages = max(1, (len(all_schools) - 1) // ITEMS_PER_PAGE + 1)
+        current_page = st.session_state.page_number
+        
+        # Garante que não estoure o limite
+        if current_page >= total_pages: 
+            current_page = 0
+            st.session_state.page_number = 0
+
+        start_idx = current_page * ITEMS_PER_PAGE
+        end_idx = start_idx + ITEMS_PER_PAGE
+        schools_to_show = all_schools[start_idx:end_idx]
+
+        st.info(f"**Encontradas {len(all_schools)} escolas.** (Página {current_page + 1} de {total_pages})")
 
         # === LOOP ESCOLAS ===
-        for escola in df_final['Escola'].unique():
+        for escola in schools_to_show:
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
             nome_supervisor = df_e['Supervisor'].iloc[0]
             unidade_id = int(df_e['UnidadeID'].iloc[0])
             data_atual = df_e['DataConferencia'].iloc[0]
             
-            # TOTAIS E ÍCONE (Mesma lógica do filtro)
-            total_edital_esc = int(df_e['Edital'].sum())
-            total_real_esc = int(df_e['Real'].sum())
-            saldo_esc = total_real_esc - total_edital_esc
-            cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
-            sinal_saldo = "+" if saldo_esc > 0 else ""
-
+            # Icone
+            total_edital_esc = int(df_e['Edital'].sum()); total_real_esc = int(df_e['Real'].sum()); saldo_esc = total_real_esc - total_edital_esc
             icon = "✅"
-            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡" # Prioridade 1: Ajuste
+            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡"
             elif "FALTA" in status_list: icon = "🔴"
             elif "EXCEDENTE" in status_list: icon = "🔵"
+            
+            cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
+            sinal_saldo = "+" if saldo_esc > 0 else ""
 
             with st.expander(f"{icon} {escola}", expanded=False):
                 c_sup, c_btn = st.columns([3, 1.5])
@@ -292,6 +306,24 @@ if st.session_state.get("authentication_status"):
                         editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
                 else:
                     st.warning("Nenhum colaborador encontrado.")
+
+        # --- CONTROLES DE PAGINAÇÃO ---
+        if total_pages > 1:
+            st.markdown("---")
+            c_prev, c_info, c_next = st.columns([1, 2, 1])
+            
+            with c_prev:
+                if st.button("⬅️ Anterior", disabled=(current_page == 0)):
+                    st.session_state.page_number -= 1
+                    st.rerun()
+            
+            with c_info:
+                st.markdown(f"<div style='text-align: center; margin-top: 10px;'>Página <b>{current_page + 1}</b> de <b>{total_pages}</b></div>", unsafe_allow_html=True)
+            
+            with c_next:
+                if st.button("Próxima ➡️", disabled=(current_page == total_pages - 1)):
+                    st.session_state.page_number += 1
+                    st.rerun()
 
     except Exception as e:
         st.error(f"Erro no sistema: {e}")
