@@ -41,24 +41,24 @@ st.markdown("""
     /* === BOTÃO MINIMALISTA DE ADICIONAR (DENTRO DO EXPANDER) === */
     div[data-testid="stExpanderDetails"] .stButton button {
         background-color: transparent !important;   
-        border: 1px solid #404040 !important;       
-        color: #29b6f6 !important;                  /* <--- AGORA É AZUL */
-        border-radius: 50% !important;              
-        width: 30px !important;                     /* <--- FICOU MENOR (30px) */
-        height: 30px !important;
+        border: none !important;                    /* SEM BORDA NO ESTADO NORMAL */
+        color: #29b6f6 !important;                  /* Ícone Azul */
+        border-radius: 50% !important;              /* Perfeitamente Redondo */
+        width: 32px !important;                     /* Tamanho ajustado */
+        height: 32px !important;
         padding: 0 !important;
-        font-size: 16px !important;                 /* <--- ÍCONE MENOR PROPORCIONAL */
+        font-size: 20px !important;                 /* Ícone um pouco maior */
         line-height: 1 !important;
         display: flex;
         align-items: center;
         justify-content: center;
         float: right;
+        transition: all 0.2s ease-in-out;           /* Transição suave */
     }
     
-    /* Hover effect */
+    /* Hover effect - Fundo sutil ao passar o mouse */
     div[data-testid="stExpanderDetails"] .stButton button:hover {
-        border-color: #29b6f6 !important;
-        background-color: rgba(41, 182, 246, 0.2) !important;
+        background-color: rgba(41, 182, 246, 0.15) !important; /* Fundo azul claro transparente */
         color: #29b6f6 !important;
         transform: scale(1.1);
     }
@@ -213,9 +213,9 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-                    else: styles[3] += 'color: #00c853; font-weight: bold;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6;'
+                    else: styles[3] += 'color: #00c853;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
@@ -321,7 +321,7 @@ if st.session_state.get("authentication_status"):
                 c_txt, c_add = st.columns([0.95, 0.05]) 
                 with c_txt: st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 with c_add:
-                    if st.button("+", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
+                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
                         adicionar_colaborador(unidade_id, escola, df_cargos_all, conn)
 
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
