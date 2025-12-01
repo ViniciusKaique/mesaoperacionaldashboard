@@ -22,12 +22,10 @@ st.markdown("""
         text-align: center !important;
     }
 
-    /* Spinner Grande */
     div[data-testid="stSpinner"] > div {
         font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
     }
 
-    /* Botão Login */
     div.stButton > button { width: 100%; display: block; margin: 0 auto; }
 </style>
 """, unsafe_allow_html=True)
@@ -58,7 +56,7 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- FUNÇÃO: EDITAR COLABORADOR ---
+# --- DIALOGS ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
     st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
@@ -74,13 +72,10 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
         novo_cargo_nome = st.selectbox("💼 Cargo:", lista_cargos, index=idx_cargo)
 
         novo_status = st.checkbox("✅ Ativo?", value=True)
-        submitted = st.form_submit_button("💾 Salvar Alterações")
-        
-        if submitted:
+        if st.form_submit_button("💾 Salvar Alterações"):
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
-            
             try:
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
@@ -103,7 +98,7 @@ if st.session_state.get("authentication_status"):
         df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
         df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
 
-        # Queries Principais
+        # Queries
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
@@ -116,7 +111,6 @@ if st.session_state.get("authentication_status"):
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         ORDER BY u."NomeUnidade", c."NomeCargo";
         """
-
         query_funcionarios = """
         SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
         FROM "Colaboradores" col
@@ -159,9 +153,9 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6;'
-                    else: styles[3] += 'color: #00c853;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                    else: styles[3] += 'color: #00c853; font-weight: bold;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
@@ -169,7 +163,7 @@ if st.session_state.get("authentication_status"):
         c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
         with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
         with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
-        with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟢 OK"])
+        with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
         with c_f4: termo_busca = st.text_input("👤 Buscar Colaborador:", "")
 
         col_cargos = list(df_resumo['Cargo'].unique()); filtro_comb = {}
@@ -178,20 +172,37 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
-        # Filtros
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
+        # === LÓGICA DE FILTRAGEM DE STATUS CORRIGIDA ===
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
+                
+                # Dados para cálculo
+                total_edital_e = df_e['Edital'].sum()
+                total_real_e = df_e['Real'].sum()
+                saldo_e = total_real_e - total_edital_e
                 status_list = df_e['Status'].tolist()
-                stt = "🟢 OK"
-                if "FALTA" in status_list: stt = "🔴 FALTA"
-                elif "EXCEDENTE" in status_list: stt = "🔵 EXCEDENTE"
-                if stt == filtro_situacao: escolas_filtro_status.append(escola)
+                
+                # Hierarquia da Classificação (AJUSTE tem prioridade sobre FALTA se o saldo for 0)
+                status_escola = "🟢 OK"
+                
+                # 1. Se saldo zerado MAS tem coisas erradas dentro (Falta e sobra) -> AJUSTE
+                if saldo_e == 0 and any(s != 'OK' for s in status_list):
+                    status_escola = "🟡 AJUSTE"
+                # 2. Se falta gente no total ou tem cargo negativo -> FALTA
+                elif "FALTA" in status_list:
+                    status_escola = "🔴 FALTA"
+                # 3. Se sobra gente -> EXCEDENTE
+                elif "EXCEDENTE" in status_list:
+                    status_escola = "🔵 EXCEDENTE"
+                
+                if status_escola == filtro_situacao:
+                    escolas_filtro_status.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_filtro_status)
 
         if filtro_comb:
@@ -218,14 +229,18 @@ if st.session_state.get("authentication_status"):
             nome_supervisor = df_e['Supervisor'].iloc[0]
             unidade_id = int(df_e['UnidadeID'].iloc[0])
             data_atual = df_e['DataConferencia'].iloc[0]
-            icon = "🔴" if "FALTA" in status_list else "🔵" if "EXCEDENTE" in status_list else "✅"
-
-            # TOTAIS
+            
+            # TOTAIS E ÍCONE (Mesma lógica do filtro)
             total_edital_esc = int(df_e['Edital'].sum())
             total_real_esc = int(df_e['Real'].sum())
             saldo_esc = total_real_esc - total_edital_esc
             cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
             sinal_saldo = "+" if saldo_esc > 0 else ""
+
+            icon = "✅"
+            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡" # Prioridade 1: Ajuste
+            elif "FALTA" in status_list: icon = "🔴"
+            elif "EXCEDENTE" in status_list: icon = "🔵"
 
             with st.expander(f"{icon} {escola}", expanded=False):
                 c_sup, c_btn = st.columns([3, 1.5])
