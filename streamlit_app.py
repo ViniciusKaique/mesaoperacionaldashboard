@@ -160,11 +160,27 @@ if st.session_state.get("authentication_status"):
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
         st.markdown("---"); st.subheader("🏫 Detalhe por Escola")
-        c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
-        with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
-        with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
-        with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
-        with c_f4: termo_busca = st.text_input("👤 Buscar Colaborador:", "")
+        
+        # --- FILTROS (AGORA COM TIPO) ---
+        c_f0, c_f1, c_f2, c_f3, c_f4 = st.columns([0.8, 1.2, 1.2, 1, 1]) # 5 Colunas
+        
+        with c_f0: 
+            # NOVO FILTRO: TIPO
+            filtro_tipo = st.selectbox("🏢 Tipo:", ["Todos"] + sorted(list(df_resumo['Tipo'].unique())))
+            
+        with c_f1: 
+            # Filtro de Escola (Pode ser refinado pelo Tipo depois, se quiser)
+            lista_escolas = sorted(list(df_resumo['Escola'].unique()))
+            filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + lista_escolas)
+            
+        with c_f2: 
+            filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
+            
+        with c_f3: 
+            filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
+            
+        with c_f4: 
+            termo_busca = st.text_input("👤 Buscar:", "")
 
         col_cargos = list(df_resumo['Cargo'].unique()); filtro_comb = {}
         cols = st.columns(5)
@@ -173,36 +189,25 @@ if st.session_state.get("authentication_status"):
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
         mask = pd.Series([True] * len(df_resumo))
+        
+        # --- APLICAÇÃO DOS FILTROS ---
+        if filtro_tipo != "Todos": mask &= (df_resumo['Tipo'] == filtro_tipo) # Filtro de Tipo
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
-        # === LÓGICA DE FILTRAGEM DE STATUS CORRIGIDA ===
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
-                
-                # Dados para cálculo
-                total_edital_e = df_e['Edital'].sum()
-                total_real_e = df_e['Real'].sum()
-                saldo_e = total_real_e - total_edital_e
+                total_edital_e = df_e['Edital'].sum(); total_real_e = df_e['Real'].sum(); saldo_e = total_real_e - total_edital_e
                 status_list = df_e['Status'].tolist()
                 
-                # Hierarquia da Classificação (AJUSTE tem prioridade sobre FALTA se o saldo for 0)
                 status_escola = "🟢 OK"
+                if saldo_e == 0 and any(s != 'OK' for s in status_list): status_escola = "🟡 AJUSTE"
+                elif "FALTA" in status_list: status_escola = "🔴 FALTA"
+                elif "EXCEDENTE" in status_list: status_escola = "🔵 EXCEDENTE"
                 
-                # 1. Se saldo zerado MAS tem coisas erradas dentro (Falta e sobra) -> AJUSTE
-                if saldo_e == 0 and any(s != 'OK' for s in status_list):
-                    status_escola = "🟡 AJUSTE"
-                # 2. Se falta gente no total ou tem cargo negativo -> FALTA
-                elif "FALTA" in status_list:
-                    status_escola = "🔴 FALTA"
-                # 3. Se sobra gente -> EXCEDENTE
-                elif "EXCEDENTE" in status_list:
-                    status_escola = "🔵 EXCEDENTE"
-                
-                if status_escola == filtro_situacao:
-                    escolas_filtro_status.append(escola)
+                if status_escola == filtro_situacao: escolas_filtro_status.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_filtro_status)
 
         if filtro_comb:
@@ -215,8 +220,9 @@ if st.session_state.get("authentication_status"):
                     if row.empty or row['Status'].iloc[0] != s: valid = False; break
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
+            
         if termo_busca:
-            match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
+            match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca, na=False)]['Escola'].unique()
             mask &= df_resumo['Escola'].isin(match)
 
         df_final = df_resumo[mask]
@@ -230,7 +236,6 @@ if st.session_state.get("authentication_status"):
             unidade_id = int(df_e['UnidadeID'].iloc[0])
             data_atual = df_e['DataConferencia'].iloc[0]
             
-            # TOTAIS E ÍCONE (Mesma lógica do filtro)
             total_edital_esc = int(df_e['Edital'].sum())
             total_real_esc = int(df_e['Real'].sum())
             saldo_esc = total_real_esc - total_edital_esc
@@ -238,7 +243,7 @@ if st.session_state.get("authentication_status"):
             sinal_saldo = "+" if saldo_esc > 0 else ""
 
             icon = "✅"
-            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡" # Prioridade 1: Ajuste
+            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡"
             elif "FALTA" in status_list: icon = "🔴"
             elif "EXCEDENTE" in status_list: icon = "🔵"
 
@@ -282,7 +287,7 @@ if st.session_state.get("authentication_status"):
 
                 st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
-                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False) | p_show['ID'].astype(str).str.contains(termo_busca)]
+                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False, na=False) | p_show['ID'].astype(str).str.contains(termo_busca, na=False)]
                 
                 if not p_show.empty:
                     event = st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
