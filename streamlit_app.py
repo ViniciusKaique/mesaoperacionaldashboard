@@ -12,26 +12,52 @@ st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; }
-    .stButton button { background-color: #ff4b4b; color: white; border-radius: 8px; }
+    
+    /* Estilo Padrão de Botões (Afeta o Login) */
+    .stButton button { 
+        background-color: #ff4b4b; 
+        color: white; 
+        border-radius: 8px; 
+        width: 100%; /* Login ocupa largura total */
+    }
+
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
+    /* Centralização de Tabelas */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
         text-align: center !important;
     }
 
-    /* Spinner Grande */
-    div[data-testid="stSpinner"] > div {
-        font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
-    }
+    /* Centralizar Botão de Login (Container) */
+    div.stButton > button { display: block; margin: 0 auto; }
 
-    /* Botão Login */
-    div.stButton > button { width: 100%; display: block; margin: 0 auto; }
+    /* === BOTÃO MINIMALISTA (SÓ DENTRO DO EXPANDER) === */
+    /* Isso afeta apenas o botão de Adicionar, deixando o Login intacto */
+    div[data-testid="stExpanderDetails"] .stButton button {
+        background-color: transparent !important;   /* Fundo Transparente */
+        border: 1px solid #404040 !important;       /* Borda sutil cinza */
+        color: #ff4b4b !important;                  /* Ícone Vermelho */
+        border-radius: 50% !important;              /* Redondo */
+        width: 35px !important;                     /* Tamanho fixo pequeno */
+        height: 35px !important;
+        padding: 0 !important;
+        font-size: 18px !important;
+        line-height: 1 !important;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        float: right;
+    }
     
-    /* Botão Minimalista */
-    div[data-testid="column"] button { width: auto !important; min-width: 40px; }
+    /* Efeito ao passar o mouse no botão minimalista */
+    div[data-testid="stExpanderDetails"] .stButton button:hover {
+        border-color: #ff4b4b !important;           /* Borda fica vermelha */
+        background-color: rgba(255, 75, 75, 0.1) !important; /* Fundo levemente vermelho */
+        color: #ff4b4b !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -61,7 +87,7 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- DIALOGS (Funções de Popup) ---
+# --- DIALOG 1: EDITAR COLABORADOR ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
     st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
@@ -82,6 +108,7 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
+            
             try:
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
@@ -90,6 +117,7 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
+# --- DIALOG 2: ADICIONAR COLABORADOR ---
 @st.dialog("➕ Novo Colaborador")
 def adicionar_colaborador(unidade_atual_id, unidade_atual_nome, df_cargos_all, conn):
     st.caption(f"Cadastrando na unidade: **{unidade_atual_nome}**")
@@ -182,23 +210,17 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6;'
-                    else: styles[3] += 'color: #00c853;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                    else: styles[3] += 'color: #00c853; font-weight: bold;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
         st.markdown("---"); st.subheader("🏫 Detalhe por Escola")
-        
-        # --- FILTROS (4 Colunas agora) ---
         c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
         with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
         with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
-        
-        # --- NOVO FILTRO DE STATUS DA UNIDADE ---
-        with c_f3: 
-            filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟢 OK"])
-            
+        with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟢 OK"])
         with c_f4: termo_busca = st.text_input("👤 Buscar Colaborador:", "")
 
         col_cargos = list(df_resumo['Cargo'].unique()); filtro_comb = {}
@@ -207,24 +229,19 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
-        # === LÓGICA DOS FILTROS ===
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
-        # Lógica do Filtro de Situação (Prioridade: Falta > Excedente > OK)
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
                 status_list = df_e['Status'].tolist()
-                
-                status_escola = "🟢 OK"
-                if "FALTA" in status_list: status_escola = "🔴 FALTA"
-                elif "EXCEDENTE" in status_list: status_escola = "🔵 EXCEDENTE"
-                
-                if status_escola == filtro_situacao:
-                    escolas_filtro_status.append(escola)
+                stt = "🟢 OK"
+                if "FALTA" in status_list: stt = "🔴 FALTA"
+                elif "EXCEDENTE" in status_list: stt = "🔵 EXCEDENTE"
+                if stt == filtro_situacao: escolas_filtro_status.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_filtro_status)
 
         if filtro_comb:
@@ -253,7 +270,7 @@ if st.session_state.get("authentication_status"):
             data_atual = df_e['DataConferencia'].iloc[0]
             icon = "🔴" if "FALTA" in status_list else "🔵" if "EXCEDENTE" in status_list else "✅"
 
-            # Cálculos de Totais da Escola
+            # TOTAIS DA ESCOLA
             total_edital_esc = int(df_e['Edital'].sum())
             total_real_esc = int(df_e['Real'].sum())
             saldo_esc = total_real_esc - total_edital_esc
@@ -274,9 +291,9 @@ if st.session_state.get("authentication_status"):
                                 session.commit()
                             st.toast("Data salva!", icon="✅"); st.rerun()
 
-                # --- NOVO: TOTAIS DA UNIDADE ---
+                # LINHA DE TOTAIS NO EXPANDER
                 st.markdown(f"""
-                <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 10px 0; border: 1px solid #404040;'>
+                <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 5px 0 15px 0; border: 1px solid #404040;'>
                     <span>📋 Edital: <b>{total_edital_esc}</b></span>
                     <span>👥 Real: <b>{total_real_esc}</b></span>
                     <span>⚖️ Saldo: <b style='color: {cor_saldo}'>{sinal_saldo}{saldo_esc}</b></span>
@@ -299,10 +316,11 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                c_txt, c_add = st.columns([0.92, 0.08]) 
+                # BOTÃO MINIMALISTA ALINHADO A DIREITA
+                c_txt, c_add = st.columns([0.95, 0.05]) 
                 with c_txt: st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 with c_add:
-                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Novo Colaborador"):
+                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
                         adicionar_colaborador(unidade_id, escola, df_cargos_all, conn)
 
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
