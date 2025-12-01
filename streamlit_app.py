@@ -22,12 +22,10 @@ st.markdown("""
         text-align: center !important;
     }
 
-    /* Spinner Grande */
     div[data-testid="stSpinner"] > div {
         font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
     }
 
-    /* Botão Login */
     div.stButton > button { width: 100%; display: block; margin: 0 auto; }
 </style>
 """, unsafe_allow_html=True)
@@ -58,9 +56,50 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- FUNÇÃO: EDITAR COLABORADOR ---
+# --- FUNÇÕES DE DADOS COM CACHE (OTIMIZAÇÃO) ---
+# Essas funções guardam os dados na memória para não ir no banco toda hora
+
+@st.cache_data(ttl=3600) # Cache de 1 hora para listas que mudam pouco
+def get_auxiliary_data():
+    conn = st.connection("postgres", type="sql")
+    df_unidades = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"')
+    df_cargos = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"')
+    return df_unidades, df_cargos
+
+@st.cache_data(ttl=300) # Cache de 5 minutos para os dados principais
+def get_main_data():
+    conn = st.connection("postgres", type="sql")
+    
+    query_resumo = """
+    SELECT 
+        t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
+        s."NomeSupervisor" AS "Supervisor", c."NomeCargo" AS "Cargo", q."Quantidade" AS "Edital",
+        (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
+    FROM "QuadroEdital" q
+    JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
+    JOIN "Cargos" c ON q."CargoID" = c."CargoID"
+    JOIN "TiposUnidades" t ON u."TipoID" = t."TipoID"
+    JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
+    ORDER BY u."NomeUnidade", c."NomeCargo";
+    """
+    
+    query_funcionarios = """
+    SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
+    FROM "Colaboradores" col
+    JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
+    JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+    WHERE col."Ativo" = TRUE
+    ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
+    """
+    
+    # show_spinner=False para ser silencioso
+    df_r = conn.query(query_resumo, ttl=0, show_spinner=False)
+    df_p = conn.query(query_funcionarios, ttl=0, show_spinner=False)
+    return df_r, df_p
+
+# --- DIALOG: EDITAR COLABORADOR ---
 @st.dialog("✏️ Editar Colaborador")
-def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
+def editar_colaborador(colab_data, df_unidades_all, df_cargos_all):
     st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
     with st.form("form_edicao"):
         lista_escolas = df_unidades_all['NomeUnidade'].tolist()
@@ -77,6 +116,7 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
         submitted = st.form_submit_button("💾 Salvar Alterações")
         
         if submitted:
+            conn = st.connection("postgres", type="sql")
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
@@ -86,6 +126,9 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
                                     {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
+                
+                # LIMPA O CACHE PARA ATUALIZAR OS DADOS
+                st.cache_data.clear()
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
@@ -97,39 +140,13 @@ if st.session_state.get("authentication_status"):
         st.write(f"👤 **{name}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Painel Gerencial + Detalhe")
 
     try:
-        conn = st.connection("postgres", type="sql")
+        # 1. Carrega Dados (Usando Cache)
+        df_unidades_all, df_cargos_all = get_auxiliary_data()
+        
+        # A primeira vez vai demorar um pouco, as próximas serão instantâneas
+        df_resumo, df_pessoas = get_main_data()
 
-        # Dados Auxiliares
-        df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
-        df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
-
-        # Queries Principais
-        query_resumo = """
-        SELECT 
-            t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
-            s."NomeSupervisor" AS "Supervisor", c."NomeCargo" AS "Cargo", q."Quantidade" AS "Edital",
-            (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
-        FROM "QuadroEdital" q
-        JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
-        JOIN "Cargos" c ON q."CargoID" = c."CargoID"
-        JOIN "TiposUnidades" t ON u."TipoID" = t."TipoID"
-        JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
-        ORDER BY u."NomeUnidade", c."NomeCargo";
-        """
-
-        query_funcionarios = """
-        SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
-        FROM "Colaboradores" col
-        JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
-        JOIN "Cargos" c ON col."CargoID" = c."CargoID"
-        WHERE col."Ativo" = TRUE
-        ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
-        """
-
-        df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
-        df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
-
-        # Processamento
+        # 2. Processamento (Rápido no Pandas)
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
@@ -159,9 +176,9 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6;'
-                    else: styles[3] += 'color: #00c853;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                    else: styles[3] += 'color: #00c853; font-weight: bold;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
@@ -178,7 +195,7 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
-        # Filtros
+        # Filtros (Processamento em Memória - Muito Rápido)
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
@@ -211,8 +228,15 @@ if st.session_state.get("authentication_status"):
         df_final = df_resumo[mask]
         st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
 
-        # === LOOP ESCOLAS ===
-        for escola in df_final['Escola'].unique():
+        # === LOOP ESCOLAS (Paginação Visual para não travar o navegador) ===
+        # Dica de Performance: Se tiver mais de 50 escolas, mostra só as 50 primeiras para não travar
+        escolas_unicas = df_final['Escola'].unique()
+        
+        if len(escolas_unicas) > 50:
+            st.warning(f"Exibindo as primeiras 50 escolas de {len(escolas_unicas)}. Use os filtros para refinar a busca.")
+            escolas_unicas = escolas_unicas[:50]
+
+        for escola in escolas_unicas:
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
             nome_supervisor = df_e['Supervisor'].iloc[0]
@@ -236,9 +260,13 @@ if st.session_state.get("authentication_status"):
                         st.markdown("Alterar data")
                         nova_data = st.date_input("Nova Data:", value=pd.Timestamp.today() if pd.isnull(data_atual) else data_atual, format="DD/MM/YYYY", key=f"dt_{unidade_id}")
                         if st.button("💾 Salvar", key=f"save_{unidade_id}"):
+                            conn = st.connection("postgres", type="sql")
                             with conn.session as session:
                                 session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
                                 session.commit()
+                            
+                            # LIMPA CACHE AO SALVAR
+                            st.cache_data.clear()
                             st.toast("Data salva!", icon="✅"); st.rerun()
 
                 st.markdown(f"""
@@ -274,7 +302,7 @@ if st.session_state.get("authentication_status"):
                     if len(event.selection.rows) > 0:
                         idx_selecionado = event.selection.rows[0]
                         dados_colaborador = p_show.iloc[idx_selecionado]
-                        editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
+                        editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all)
                 else:
                     st.warning("Nenhum colaborador encontrado.")
 
