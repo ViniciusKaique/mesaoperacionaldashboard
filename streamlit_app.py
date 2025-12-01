@@ -13,7 +13,7 @@ st.markdown("""
 <style>
     .block-container { padding-top: 1rem; }
     
-    /* Estilo Padrão de Botões (Afeta o Login e Confirmações) */
+    /* Estilo Padrão de Botões (Login, Salvar, etc) */
     .stButton button { 
         background-color: #ff4b4b; 
         color: white; 
@@ -41,25 +41,25 @@ st.markdown("""
     /* === BOTÃO MINIMALISTA DE ADICIONAR (DENTRO DO EXPANDER) === */
     div[data-testid="stExpanderDetails"] .stButton button {
         background-color: transparent !important;   
-        border: none !important;                    /* SEM BORDA NO ESTADO NORMAL */
-        color: #29b6f6 !important;                  /* Ícone Azul */
-        border-radius: 50% !important;              /* Perfeitamente Redondo */
-        width: 32px !important;                     /* Tamanho ajustado */
+        border: none !important;                    /* Sem borda */
+        color: white !important;                    /* <--- AGORA É BRANCO */
+        border-radius: 50% !important;              
+        width: 32px !important;                     
         height: 32px !important;
         padding: 0 !important;
-        font-size: 20px !important;                 /* Ícone um pouco maior */
+        font-size: 20px !important;                 
         line-height: 1 !important;
         display: flex;
         align-items: center;
         justify-content: center;
         float: right;
-        transition: all 0.2s ease-in-out;           /* Transição suave */
+        transition: all 0.2s ease-in-out;
     }
     
     /* Hover effect - Fundo sutil ao passar o mouse */
     div[data-testid="stExpanderDetails"] .stButton button:hover {
-        background-color: rgba(41, 182, 246, 0.15) !important; /* Fundo azul claro transparente */
-        color: #29b6f6 !important;
+        background-color: rgba(255, 255, 255, 0.1) !important; /* Fundo branco transparente */
+        color: white !important;
         transform: scale(1.1);
     }
 </style>
@@ -213,9 +213,9 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6;'
-                    else: styles[3] += 'color: #00c853;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                    else: styles[3] += 'color: #00c853; font-weight: bold;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
