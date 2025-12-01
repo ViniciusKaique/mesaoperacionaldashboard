@@ -12,15 +12,7 @@ st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; }
-    
-    /* Estilo Padrão de Botões (Login, Salvar, etc) */
-    .stButton button { 
-        background-color: #ff4b4b; 
-        color: white; 
-        border-radius: 8px; 
-        width: 100%; 
-    }
-
+    .stButton button { background-color: #ff4b4b; color: white; border-radius: 8px; }
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
@@ -35,33 +27,8 @@ st.markdown("""
         font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
     }
 
-    /* Botão Login Centralizado */
-    div.stButton > button { display: block; margin: 0 auto; }
-
-    /* === BOTÃO MINIMALISTA DE ADICIONAR (DENTRO DO EXPANDER) === */
-    div[data-testid="stExpanderDetails"] .stButton button {
-        background-color: transparent !important;   
-        border: none !important;                    /* Sem borda */
-        color: white !important;                    /* <--- AGORA É BRANCO */
-        border-radius: 50% !important;              
-        width: 32px !important;                     
-        height: 32px !important;
-        padding: 0 !important;
-        font-size: 20px !important;                 
-        line-height: 1 !important;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        float: right;
-        transition: all 0.2s ease-in-out;
-    }
-    
-    /* Hover effect - Fundo sutil ao passar o mouse */
-    div[data-testid="stExpanderDetails"] .stButton button:hover {
-        background-color: rgba(255, 255, 255, 0.1) !important; /* Fundo branco transparente */
-        color: white !important;
-        transform: scale(1.1);
-    }
+    /* Botão Login */
+    div.stButton > button { width: 100%; display: block; margin: 0 auto; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -91,7 +58,7 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- DIALOG 1: EDITAR COLABORADOR ---
+# --- FUNÇÃO: EDITAR COLABORADOR ---
 @st.dialog("✏️ Editar Colaborador")
 def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
     st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
@@ -107,11 +74,13 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
         novo_cargo_nome = st.selectbox("💼 Cargo:", lista_cargos, index=idx_cargo)
 
         novo_status = st.checkbox("✅ Ativo?", value=True)
+        submitted = st.form_submit_button("💾 Salvar Alterações")
         
-        if st.form_submit_button("💾 Salvar Alterações"):
+        if submitted:
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
+            
             try:
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
@@ -119,30 +88,6 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                     session.commit()
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
-
-# --- DIALOG 2: ADICIONAR COLABORADOR ---
-@st.dialog("➕ Novo Colaborador")
-def adicionar_colaborador(unidade_atual_id, unidade_atual_nome, df_cargos_all, conn):
-    st.caption(f"Cadastrando na unidade: **{unidade_atual_nome}**")
-    with st.form("form_add"):
-        c1, c2 = st.columns([1, 2])
-        with c1: novo_id = st.number_input("Matrícula (ID):", min_value=1, step=1, format="%d")
-        with c2: nome_novo = st.text_input("Nome Completo:")
-        cargo_novo_nome = st.selectbox("Cargo:", df_cargos_all['NomeCargo'].tolist())
-        
-        if st.form_submit_button("💾 Cadastrar"):
-            if not nome_novo: st.warning("Nome é obrigatório."); st.stop()
-            res = conn.query(f'SELECT count(*) FROM "Colaboradores" WHERE "ColaboradorID" = {novo_id}', ttl=0)
-            if res.iloc[0,0] > 0: st.error(f"Erro: ID {novo_id} já existe!")
-            else:
-                cargo_novo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == cargo_novo_nome]['CargoID'].iloc[0])
-                try:
-                    with conn.session as session:
-                        sql = text("INSERT INTO \"Colaboradores\" (\"ColaboradorID\", \"Nome\", \"UnidadeID\", \"CargoID\", \"Ativo\") VALUES (:id, :nome, :uid, :cid, TRUE)")
-                        session.execute(sql, {"id": novo_id, "nome": nome_novo, "uid": unidade_atual_id, "cid": cargo_novo_id})
-                        session.commit()
-                    st.toast("Cadastrado!", icon="✅"); st.rerun()
-                except Exception as e: st.error(f"Erro: {e}")
 
 # --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
@@ -158,7 +103,7 @@ if st.session_state.get("authentication_status"):
         df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
         df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
 
-        # Queries
+        # Queries Principais
         query_resumo = """
         SELECT 
             t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
@@ -171,6 +116,7 @@ if st.session_state.get("authentication_status"):
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         ORDER BY u."NomeUnidade", c."NomeCargo";
         """
+
         query_funcionarios = """
         SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
         FROM "Colaboradores" col
@@ -213,9 +159,9 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-                    else: styles[3] += 'color: #00c853; font-weight: bold;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6;'
+                    else: styles[3] += 'color: #00c853;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
@@ -232,6 +178,7 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
+        # Filtros
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
@@ -318,12 +265,7 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                c_txt, c_add = st.columns([0.95, 0.05]) 
-                with c_txt: st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
-                with c_add:
-                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
-                        adicionar_colaborador(unidade_id, escola, df_cargos_all, conn)
-
+                st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
                 if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False) | p_show['ID'].astype(str).str.contains(termo_busca)]
                 
