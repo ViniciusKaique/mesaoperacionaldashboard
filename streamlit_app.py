@@ -18,30 +18,28 @@ st.markdown("""
         background-color: #ff4b4b; 
         color: white; 
         border-radius: 8px; 
-        width: 100%; /* Login ocupa largura total */
+        width: 100%; 
     }
 
     [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
     .dataframe { font-size: 14px !important; }
     
-    /* Centralização de Tabelas */
     th, td { text-align: center !important; }
     .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
         justify-content: center !important;
         text-align: center !important;
     }
 
-    /* Centralizar Botão de Login (Container) */
+    /* Centralizar Botão de Login */
     div.stButton > button { display: block; margin: 0 auto; }
 
-    /* === BOTÃO MINIMALISTA (SÓ DENTRO DO EXPANDER) === */
-    /* Isso afeta apenas o botão de Adicionar, deixando o Login intacto */
+    /* === BOTÃO MINIMALISTA (ADICIONAR) === */
     div[data-testid="stExpanderDetails"] .stButton button {
-        background-color: transparent !important;   /* Fundo Transparente */
-        border: 1px solid #404040 !important;       /* Borda sutil cinza */
-        color: #ff4b4b !important;                  /* Ícone Vermelho */
-        border-radius: 50% !important;              /* Redondo */
-        width: 35px !important;                     /* Tamanho fixo pequeno */
+        background-color: transparent !important;   
+        border: 1px solid #404040 !important;       
+        color: #ff4b4b !important;                  /* Ícone Vermelho no estado normal */
+        border-radius: 50% !important;              
+        width: 35px !important;                     
         height: 35px !important;
         padding: 0 !important;
         font-size: 18px !important;
@@ -52,11 +50,12 @@ st.markdown("""
         float: right;
     }
     
-    /* Efeito ao passar o mouse no botão minimalista */
+    /* === EFEITO AO PASSAR O MOUSE (HOVER) - AGORA AZUL === */
     div[data-testid="stExpanderDetails"] .stButton button:hover {
-        border-color: #ff4b4b !important;           /* Borda fica vermelha */
-        background-color: rgba(255, 75, 75, 0.1) !important; /* Fundo levemente vermelho */
-        color: #ff4b4b !important;
+        border-color: #29b6f6 !important;           /* Borda Azul */
+        background-color: rgba(41, 182, 246, 0.1) !important; /* Fundo Azulzinho transparente */
+        color: #29b6f6 !important;                  /* Ícone Azul */
+        transform: scale(1.1);                      /* Leve aumento para dar feedback */
     }
 </style>
 """, unsafe_allow_html=True)
@@ -108,7 +107,6 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
-            
             try:
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
@@ -270,7 +268,7 @@ if st.session_state.get("authentication_status"):
             data_atual = df_e['DataConferencia'].iloc[0]
             icon = "🔴" if "FALTA" in status_list else "🔵" if "EXCEDENTE" in status_list else "✅"
 
-            # TOTAIS DA ESCOLA
+            # TOTAIS
             total_edital_esc = int(df_e['Edital'].sum())
             total_real_esc = int(df_e['Real'].sum())
             saldo_esc = total_real_esc - total_edital_esc
@@ -291,7 +289,6 @@ if st.session_state.get("authentication_status"):
                                 session.commit()
                             st.toast("Data salva!", icon="✅"); st.rerun()
 
-                # LINHA DE TOTAIS NO EXPANDER
                 st.markdown(f"""
                 <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 5px 0 15px 0; border: 1px solid #404040;'>
                     <span>📋 Edital: <b>{total_edital_esc}</b></span>
@@ -316,7 +313,6 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                # BOTÃO MINIMALISTA ALINHADO A DIREITA
                 c_txt, c_add = st.columns([0.95, 0.05]) 
                 with c_txt: st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 with c_add:
