@@ -27,6 +27,21 @@ st.markdown("""
     }
 
     div.stButton > button { width: 100%; display: block; margin: 0 auto; }
+
+    /* BOTÃO MINIMALISTA */
+    div[data-testid="stExpanderDetails"] .stButton button {
+        background-color: transparent !important;   
+        border: none !important;
+        color: #29b6f6 !important;
+        border-radius: 50% !important;              
+        width: 32px !important; height: 32px !important; padding: 0 !important;
+        font-size: 20px !important; line-height: 1 !important;
+        display: flex; align-items: center; justify-content: center; float: right;
+    }
+    div[data-testid="stExpanderDetails"] .stButton button:hover {
+        background-color: rgba(41, 182, 246, 0.15) !important;
+        transform: scale(1.1);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,9 +71,46 @@ if not st.session_state.get("authentication_status"):
     if st.session_state.get("authentication_status") is False:
         with col_centro: st.error('Usuário ou senha incorretos')
 
-# --- DIALOGS ---
+# --- OTIMIZAÇÃO 1: FUNÇÃO DE CARREGAMENTO COM CACHE ---
+@st.cache_data(ttl=600, show_spinner=False)
+def load_data():
+    conn = st.connection("postgres", type="sql")
+    
+    # Listas Auxiliares (Cacheada)
+    df_unidades = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"')
+    df_cargos = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"')
+
+    # Queries Principais
+    q_resumo = """
+    SELECT 
+        t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
+        s."NomeSupervisor" AS "Supervisor", c."NomeCargo" AS "Cargo", q."Quantidade" AS "Edital",
+        (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
+    FROM "QuadroEdital" q
+    JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
+    JOIN "Cargos" c ON q."CargoID" = c."CargoID"
+    JOIN "TiposUnidades" t ON u."TipoID" = t."TipoID"
+    JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
+    ORDER BY u."NomeUnidade", c."NomeCargo";
+    """
+    
+    q_func = """
+    SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
+    FROM "Colaboradores" col
+    JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
+    JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+    WHERE col."Ativo" = TRUE
+    ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
+    """
+    
+    df_resumo = conn.query(q_resumo)
+    df_pessoas = conn.query(q_func)
+    
+    return df_unidades, df_cargos, df_resumo, df_pessoas
+
+# --- FUNÇÕES DE EDIÇÃO ---
 @st.dialog("✏️ Editar Colaborador")
-def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
+def editar_colaborador(colab_data, df_unidades_all, df_cargos_all):
     st.write(f"Editando: **{colab_data['Funcionario']}** (ID: {colab_data['ID']})")
     with st.form("form_edicao"):
         lista_escolas = df_unidades_all['NomeUnidade'].tolist()
@@ -72,7 +124,9 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
         novo_cargo_nome = st.selectbox("💼 Cargo:", lista_cargos, index=idx_cargo)
 
         novo_status = st.checkbox("✅ Ativo?", value=True)
+        
         if st.form_submit_button("💾 Salvar Alterações"):
+            conn = st.connection("postgres", type="sql")
             novo_unidade_id = int(df_unidades_all[df_unidades_all['NomeUnidade'] == nova_escola_nome]['UnidadeID'].iloc[0])
             novo_cargo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == novo_cargo_nome]['CargoID'].iloc[0])
             colab_id = int(colab_data['ID'])
@@ -81,8 +135,36 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
                                     {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
+                st.cache_data.clear() # Limpa cache para atualizar dados
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
+
+@st.dialog("➕ Novo Colaborador")
+def adicionar_colaborador(unidade_atual_id, unidade_atual_nome, df_cargos_all):
+    st.caption(f"Cadastrando na unidade: **{unidade_atual_nome}**")
+    with st.form("form_add"):
+        c1, c2 = st.columns([1, 2])
+        with c1: novo_id = st.number_input("Matrícula (ID):", min_value=1, step=1, format="%d")
+        with c2: nome_novo = st.text_input("Nome Completo:")
+        cargo_novo_nome = st.selectbox("Cargo:", df_cargos_all['NomeCargo'].tolist())
+        
+        if st.form_submit_button("💾 Cadastrar"):
+            if not nome_novo: st.warning("Nome é obrigatório."); st.stop()
+            conn = st.connection("postgres", type="sql")
+            
+            # Verifica ID (Sem cache para garantir unicidade)
+            res = conn.query(f'SELECT count(*) FROM "Colaboradores" WHERE "ColaboradorID" = {novo_id}', ttl=0)
+            if res.iloc[0,0] > 0: st.error(f"Erro: ID {novo_id} já existe!")
+            else:
+                cargo_novo_id = int(df_cargos_all[df_cargos_all['NomeCargo'] == cargo_novo_nome]['CargoID'].iloc[0])
+                try:
+                    with conn.session as session:
+                        sql = text("INSERT INTO \"Colaboradores\" (\"ColaboradorID\", \"Nome\", \"UnidadeID\", \"CargoID\", \"Ativo\") VALUES (:id, :nome, :uid, :cid, TRUE)")
+                        session.execute(sql, {"id": novo_id, "nome": nome_novo, "uid": unidade_atual_id, "cid": cargo_novo_id})
+                        session.commit()
+                    st.cache_data.clear() # Limpa cache
+                    st.toast("Cadastrado!", icon="✅"); st.rerun()
+                except Exception as e: st.error(f"Erro: {e}")
 
 # --- SISTEMA PRINCIPAL ---
 if st.session_state.get("authentication_status"):
@@ -92,49 +174,24 @@ if st.session_state.get("authentication_status"):
         st.write(f"👤 **{name}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Painel Gerencial + Detalhe")
 
     try:
-        conn = st.connection("postgres", type="sql")
+        # Carrega dados do Cache (MUITO MAIS RÁPIDO)
+        with st.spinner("🕵️‍♂️ Carregando dados..."):
+            df_unidades_all, df_cargos_all, df_resumo, df_pessoas = load_data()
 
-        # Dados Auxiliares
-        df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
-        df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
-
-        # Queries
-        query_resumo = """
-        SELECT 
-            t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
-            s."NomeSupervisor" AS "Supervisor", c."NomeCargo" AS "Cargo", q."Quantidade" AS "Edital",
-            (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
-        FROM "QuadroEdital" q
-        JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
-        JOIN "Cargos" c ON q."CargoID" = c."CargoID"
-        JOIN "TiposUnidades" t ON u."TipoID" = t."TipoID"
-        JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
-        ORDER BY u."NomeUnidade", c."NomeCargo";
-        """
-        query_funcionarios = """
-        SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
-        FROM "Colaboradores" col
-        JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
-        JOIN "Cargos" c ON col."CargoID" = c."CargoID"
-        WHERE col."Ativo" = TRUE
-        ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
-        """
-
-        df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
-        df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
-
-        # Processamento
+        # OTIMIZAÇÃO 2: Pré-cálculos vetorizados (Rápido)
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
 
-        def define_status(row):
-            diff = row['Diferenca_num']; 
+        # Lógica de Status Otimizada
+        def get_status_label(diff):
             if diff < 0: return '🔴 FALTA'
             elif diff > 0: return '🔵 EXCEDENTE'
             return '🟢 OK'
-        df_resumo['Status_display'] = df_resumo.apply(define_status, axis=1)
-        df_resumo['Status'] = df_resumo['Status_display'].apply(lambda x: x.split(' ')[1])
+        
+        df_resumo['Status_display'] = df_resumo['Diferenca_num'].apply(get_status_label)
+        # Extrai texto puro para filtro
+        df_resumo['Status'] = df_resumo['Status_display'].str.split(' ').str[1]
 
         # === DASHBOARD ===
         st.title("📊 Mesa Operacional")
@@ -172,57 +229,46 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
+        # Filtros (Em Memória - Rápido)
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
-        # === LÓGICA DE FILTRAGEM DE STATUS CORRIGIDA ===
+        # Lógica Ajuste Otimizada
         if filtro_situacao != "Todas":
-            escolas_filtro_status = []
-            for escola in df_resumo['Escola'].unique():
-                df_e = df_resumo[df_resumo['Escola'] == escola]
-                
-                # Dados para cálculo
-                total_edital_e = df_e['Edital'].sum()
-                total_real_e = df_e['Real'].sum()
-                saldo_e = total_real_e - total_edital_e
-                status_list = df_e['Status'].tolist()
-                
-                # Hierarquia da Classificação (AJUSTE tem prioridade sobre FALTA se o saldo for 0)
-                status_escola = "🟢 OK"
-                
-                # 1. Se saldo zerado MAS tem coisas erradas dentro (Falta e sobra) -> AJUSTE
-                if saldo_e == 0 and any(s != 'OK' for s in status_list):
-                    status_escola = "🟡 AJUSTE"
-                # 2. Se falta gente no total ou tem cargo negativo -> FALTA
-                elif "FALTA" in status_list:
-                    status_escola = "🔴 FALTA"
-                # 3. Se sobra gente -> EXCEDENTE
-                elif "EXCEDENTE" in status_list:
-                    status_escola = "🔵 EXCEDENTE"
-                
-                if status_escola == filtro_situacao:
-                    escolas_filtro_status.append(escola)
-            mask &= df_resumo['Escola'].isin(escolas_filtro_status)
+            # Agrupa por escola para calcular status
+            grp = df_resumo.groupby('Escola').agg({
+                'Edital': 'sum', 
+                'Real': 'sum', 
+                'Status': lambda x: list(x)
+            })
+            grp['Saldo'] = grp['Real'] - grp['Edital']
+            
+            def get_school_status(row):
+                if row['Saldo'] == 0 and any(s != 'OK' for s in row['Status']): return "🟡 AJUSTE"
+                if "FALTA" in row['Status']: return "🔴 FALTA"
+                if "EXCEDENTE" in row['Status']: return "🔵 EXCEDENTE"
+                return "🟢 OK"
+            
+            grp['FinalStatus'] = grp.apply(get_school_status, axis=1)
+            valid_schools = grp[grp['FinalStatus'] == filtro_situacao].index
+            mask &= df_resumo['Escola'].isin(valid_schools)
 
         if filtro_comb:
-            escolas_validas = []
-            for escola in df_resumo['Escola'].unique():
-                df_e = df_resumo[df_resumo['Escola'] == escola]
-                valid = True
-                for c, s in filtro_comb.items():
-                    row = df_e[df_e['Cargo'] == c]
-                    if row.empty or row['Status'].iloc[0] != s: valid = False; break
-                if valid: escolas_validas.append(escola)
-            mask &= df_resumo['Escola'].isin(escolas_validas)
+            # Filtro complexo de cargos (Otimizado)
+            valid_schools = df_resumo.groupby('Escola').apply(lambda x: all(x[x['Cargo'] == c]['Status'].iloc[0] == s for c, s in filtro_comb.items() if not x[x['Cargo'] == c].empty))
+            mask &= df_resumo['Escola'].isin(valid_schools[valid_schools].index)
+            
         if termo_busca:
-            match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
+            match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca, na=False)]['Escola'].unique()
             mask &= df_resumo['Escola'].isin(match)
 
         df_final = df_resumo[mask]
         st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
 
         # === LOOP ESCOLAS ===
+        conn_update = st.connection("postgres", type="sql") # Conexão para updates fora do cache
+        
         for escola in df_final['Escola'].unique():
             df_e = df_final[df_final['Escola'] == escola].copy()
             status_list = df_e['Status'].tolist()
@@ -230,17 +276,15 @@ if st.session_state.get("authentication_status"):
             unidade_id = int(df_e['UnidadeID'].iloc[0])
             data_atual = df_e['DataConferencia'].iloc[0]
             
-            # TOTAIS E ÍCONE (Mesma lógica do filtro)
-            total_edital_esc = int(df_e['Edital'].sum())
-            total_real_esc = int(df_e['Real'].sum())
-            saldo_esc = total_real_esc - total_edital_esc
-            cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
-            sinal_saldo = "+" if saldo_esc > 0 else ""
-
+            # Cálculos Rápidos
+            total_e = df_e['Edital'].sum(); total_r = df_e['Real'].sum(); saldo = total_r - total_e
             icon = "✅"
-            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡" # Prioridade 1: Ajuste
+            if saldo == 0 and any(s != 'OK' for s in status_list): icon = "🟡"
             elif "FALTA" in status_list: icon = "🔴"
             elif "EXCEDENTE" in status_list: icon = "🔵"
+            
+            cor = "red" if saldo < 0 else "blue" if saldo > 0 else "green"
+            sinal = "+" if saldo > 0 else ""
 
             with st.expander(f"{icon} {escola}", expanded=False):
                 c_sup, c_btn = st.columns([3, 1.5])
@@ -251,18 +295,13 @@ if st.session_state.get("authentication_status"):
                         st.markdown("Alterar data")
                         nova_data = st.date_input("Nova Data:", value=pd.Timestamp.today() if pd.isnull(data_atual) else data_atual, format="DD/MM/YYYY", key=f"dt_{unidade_id}")
                         if st.button("💾 Salvar", key=f"save_{unidade_id}"):
-                            with conn.session as session:
+                            with conn_update.session as session:
                                 session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
                                 session.commit()
+                            st.cache_data.clear() # Limpa cache!
                             st.toast("Data salva!", icon="✅"); st.rerun()
 
-                st.markdown(f"""
-                <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 5px 0 15px 0; border: 1px solid #404040;'>
-                    <span>📋 Edital: <b>{total_edital_esc}</b></span>
-                    <span>👥 Real: <b>{total_real_esc}</b></span>
-                    <span>⚖️ Saldo: <b style='color: {cor_saldo}'>{sinal_saldo}{saldo_esc}</b></span>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f"""<div style='display:flex; justify-content:space-around; background-color:#262730; padding:8px; border-radius:5px; margin:5px 0 15px 0; border:1px solid #404040;'><span>📋 Edital: <b>{total_e}</b></span><span>👥 Real: <b>{total_r}</b></span><span>⚖️ Saldo: <b style='color:{cor}'>{sinal}{saldo}</b></span></div>""", unsafe_allow_html=True)
 
                 st.markdown("#### 📊 Quadro de Vagas")
                 d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
@@ -280,16 +319,19 @@ if st.session_state.get("authentication_status"):
                     return styles
                 st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
 
-                st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
+                c_txt, c_add = st.columns([0.95, 0.05]) 
+                with c_txt: st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
+                with c_add:
+                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
+                        adicionar_colaborador(unidade_id, escola, df_cargos_all)
+
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
-                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False) | p_show['ID'].astype(str).str.contains(termo_busca)]
+                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False, na=False) | p_show['ID'].astype(str).str.contains(termo_busca, na=False)]
                 
                 if not p_show.empty:
                     event = st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
                     if len(event.selection.rows) > 0:
-                        idx_selecionado = event.selection.rows[0]
-                        dados_colaborador = p_show.iloc[idx_selecionado]
-                        editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
+                        editar_colaborador(p_show.iloc[event.selection.rows[0]], df_unidades_all, df_cargos_all)
                 else:
                     st.warning("Nenhum colaborador encontrado.")
 
