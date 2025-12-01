@@ -13,7 +13,7 @@ st.markdown("""
 <style>
     .block-container { padding-top: 1rem; }
     
-    /* Estilo Padrão de Botões (Afeta o Login) */
+    /* Estilo Padrão de Botões (Afeta o Login e Confirmações) */
     .stButton button { 
         background-color: #ff4b4b; 
         color: white; 
@@ -30,19 +30,24 @@ st.markdown("""
         text-align: center !important;
     }
 
-    /* Centralizar Botão de Login */
+    /* Spinner Grande */
+    div[data-testid="stSpinner"] > div {
+        font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
+    }
+
+    /* Botão Login Centralizado */
     div.stButton > button { display: block; margin: 0 auto; }
 
-    /* === BOTÃO MINIMALISTA (ADICIONAR) === */
+    /* === BOTÃO MINIMALISTA DE ADICIONAR (DENTRO DO EXPANDER) === */
     div[data-testid="stExpanderDetails"] .stButton button {
         background-color: transparent !important;   
         border: 1px solid #404040 !important;       
-        color: #ff4b4b !important;                  /* Ícone Vermelho no estado normal */
+        color: #29b6f6 !important;                  /* <--- AGORA É AZUL */
         border-radius: 50% !important;              
-        width: 35px !important;                     
-        height: 35px !important;
+        width: 30px !important;                     /* <--- FICOU MENOR (30px) */
+        height: 30px !important;
         padding: 0 !important;
-        font-size: 18px !important;
+        font-size: 16px !important;                 /* <--- ÍCONE MENOR PROPORCIONAL */
         line-height: 1 !important;
         display: flex;
         align-items: center;
@@ -50,12 +55,12 @@ st.markdown("""
         float: right;
     }
     
-    /* === EFEITO AO PASSAR O MOUSE (HOVER) - AGORA AZUL === */
+    /* Hover effect */
     div[data-testid="stExpanderDetails"] .stButton button:hover {
-        border-color: #29b6f6 !important;           /* Borda Azul */
-        background-color: rgba(41, 182, 246, 0.1) !important; /* Fundo Azulzinho transparente */
-        color: #29b6f6 !important;                  /* Ícone Azul */
-        transform: scale(1.1);                      /* Leve aumento para dar feedback */
+        border-color: #29b6f6 !important;
+        background-color: rgba(41, 182, 246, 0.2) !important;
+        color: #29b6f6 !important;
+        transform: scale(1.1);
     }
 </style>
 """, unsafe_allow_html=True)
