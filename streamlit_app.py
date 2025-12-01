@@ -321,7 +321,7 @@ if st.session_state.get("authentication_status"):
                 c_txt, c_add = st.columns([0.95, 0.05]) 
                 with c_txt: st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 with c_add:
-                    if st.button("➕", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
+                    if st.button("+", key=f"add_{unidade_id}", help="Adicionar Colaborador"):
                         adicionar_colaborador(unidade_id, escola, df_cargos_all, conn)
 
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
