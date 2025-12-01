@@ -134,6 +134,8 @@ if st.session_state.get("authentication_status"):
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
 
+        # === AJUSTE NA LÓGICA DO STATUS (LINHA A LINHA) ===
+        # Mantém a lógica original por cargo
         def define_status(row):
             diff = row['Diferenca_num']; 
             if diff < 0: return '🔴 FALTA'
@@ -159,9 +161,9 @@ if st.session_state.get("authentication_status"):
                 def style_table(row):
                     styles = ['text-align: center;'] * 4
                     val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6;'
-                    else: styles[3] += 'color: #00c853;'
+                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                    else: styles[3] += 'color: #00c853; font-weight: bold;'
                     return styles
                 st.dataframe(df_por_cargo[['Cargo','Edital','Real','Diferenca_display']].rename(columns={'Diferenca_display':'Diferenca'}).style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
 
@@ -169,7 +171,11 @@ if st.session_state.get("authentication_status"):
         c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
         with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
         with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
-        with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟢 OK"])
+        
+        # === FILTRO DE SITUAÇÃO ATUALIZADO ===
+        with c_f3: 
+            filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
+            
         with c_f4: termo_busca = st.text_input("👤 Buscar Colaborador:", "")
 
         col_cargos = list(df_resumo['Cargo'].unique()); filtro_comb = {}
@@ -178,20 +184,38 @@ if st.session_state.get("authentication_status"):
             with cols[i % 5]:
                 if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": filtro_comb[cargo] = sel
 
-        # Filtros
         mask = pd.Series([True] * len(df_resumo))
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
+        # === LÓGICA DO STATUS DA ESCOLA (AJUSTE) ===
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
+                
+                # Cálculos para determinar o status da escola
+                total_edital = df_e['Edital'].sum()
+                total_real = df_e['Real'].sum()
+                saldo = total_real - total_edital
+                
+                # Lista de status individuais dos cargos
                 status_list = df_e['Status'].tolist()
-                stt = "🟢 OK"
-                if "FALTA" in status_list: stt = "🔴 FALTA"
-                elif "EXCEDENTE" in status_list: stt = "🔵 EXCEDENTE"
-                if stt == filtro_situacao: escolas_filtro_status.append(escola)
+                
+                status_escola = "🟢 OK"
+                
+                if "FALTA" in status_list:
+                    status_escola = "🔴 FALTA"
+                elif saldo == 0 and ("EXCEDENTE" in status_list): 
+                    # Se o saldo final é 0, mas tem excedente (logo tem falta em outro cargo que a lógica acima já pegaria como Falta, mas para garantir a classificação correta de Ajuste, usamos a divergência)
+                    # Melhor lógica: Se saldo é 0, mas tem cargos que não estão OK
+                    if any(s != 'OK' for s in status_list):
+                        status_escola = "🟡 AJUSTE"
+                elif "EXCEDENTE" in status_list:
+                    status_escola = "🔵 EXCEDENTE"
+                
+                if status_escola == filtro_situacao:
+                    escolas_filtro_status.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_filtro_status)
 
         if filtro_comb:
@@ -218,12 +242,21 @@ if st.session_state.get("authentication_status"):
             nome_supervisor = df_e['Supervisor'].iloc[0]
             unidade_id = int(df_e['UnidadeID'].iloc[0])
             data_atual = df_e['DataConferencia'].iloc[0]
-            icon = "🔴" if "FALTA" in status_list else "🔵" if "EXCEDENTE" in status_list else "✅"
-
+            
             # TOTAIS
             total_edital_esc = int(df_e['Edital'].sum())
             total_real_esc = int(df_e['Real'].sum())
             saldo_esc = total_real_esc - total_edital_esc
+            
+            # Lógica do Ícone da Escola (Atualizada)
+            icon = "✅"
+            if "FALTA" in status_list: 
+                icon = "🔴"
+            elif saldo_esc == 0 and any(s != 'OK' for s in status_list):
+                icon = "🟡" # AJUSTE
+            elif "EXCEDENTE" in status_list: 
+                icon = "🔵"
+
             cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
             sinal_saldo = "+" if saldo_esc > 0 else ""
 
