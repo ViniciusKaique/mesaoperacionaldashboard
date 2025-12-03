@@ -176,30 +176,28 @@ if st.session_state.get("authentication_status"):
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
-        # === LÓGICA DE FILTRAGEM DE STATUS CORRIGIDA ===
+        # === LÓGICA DE FILTRAGEM CORRIGIDA (Baseada no Saldo) ===
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
                 
-                # Dados para cálculo
                 total_edital_e = df_e['Edital'].sum()
                 total_real_e = df_e['Real'].sum()
                 saldo_e = total_real_e - total_edital_e
                 status_list = df_e['Status'].tolist()
                 
-                # Hierarquia da Classificação (AJUSTE tem prioridade sobre FALTA se o saldo for 0)
                 status_escola = "🟢 OK"
                 
-                # 1. Se saldo zerado MAS tem coisas erradas dentro (Falta e sobra) -> AJUSTE
-                if saldo_e == 0 and any(s != 'OK' for s in status_list):
-                    status_escola = "🟡 AJUSTE"
-                # 2. Se falta gente no total ou tem cargo negativo -> FALTA
-                elif "FALTA" in status_list:
-                    status_escola = "🔴 FALTA"
-                # 3. Se sobra gente -> EXCEDENTE
-                elif "EXCEDENTE" in status_list:
+                # 1. Prioridade: Saldo > 0 é EXCEDENTE (mesmo se tiver falta interna)
+                if saldo_e > 0:
                     status_escola = "🔵 EXCEDENTE"
+                # 2. Prioridade: Saldo < 0 é FALTA
+                elif saldo_e < 0:
+                    status_escola = "🔴 FALTA"
+                # 3. Prioridade: Saldo == 0 mas cargos errados é AJUSTE
+                elif saldo_e == 0 and any(s != 'OK' for s in status_list):
+                    status_escola = "🟡 AJUSTE"
                 
                 if status_escola == filtro_situacao:
                     escolas_filtro_status.append(escola)
@@ -216,7 +214,7 @@ if st.session_state.get("authentication_status"):
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
         if termo_busca:
-            match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca)]['Escola'].unique()
+            match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca, na=False)]['Escola'].unique()
             mask &= df_resumo['Escola'].isin(match)
 
         df_final = df_resumo[mask]
@@ -230,17 +228,21 @@ if st.session_state.get("authentication_status"):
             unidade_id = int(df_e['UnidadeID'].iloc[0])
             data_atual = df_e['DataConferencia'].iloc[0]
             
-            # TOTAIS E ÍCONE (Mesma lógica do filtro)
+            # Totais
             total_edital_esc = int(df_e['Edital'].sum())
             total_real_esc = int(df_e['Real'].sum())
             saldo_esc = total_real_esc - total_edital_esc
             cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
             sinal_saldo = "+" if saldo_esc > 0 else ""
 
+            # === LÓGICA DO ÍCONE CORRIGIDA (IGUAL AO FILTRO) ===
             icon = "✅"
-            if saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡" # Prioridade 1: Ajuste
-            elif "FALTA" in status_list: icon = "🔴"
-            elif "EXCEDENTE" in status_list: icon = "🔵"
+            if saldo_esc > 0:
+                icon = "🔵" # Excedente (Prioridade máxima se saldo positivo)
+            elif saldo_esc < 0:
+                icon = "🔴" # Falta (Prioridade máxima se saldo negativo)
+            elif saldo_esc == 0 and any(s != 'OK' for s in status_list):
+                icon = "🟡" # Ajuste
 
             with st.expander(f"{icon} {escola}", expanded=False):
                 c_sup, c_btn = st.columns([3, 1.5])
@@ -282,7 +284,7 @@ if st.session_state.get("authentication_status"):
 
                 st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                 p_show = df_pessoas[df_pessoas['Escola'] == escola]
-                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False) | p_show['ID'].astype(str).str.contains(termo_busca)]
+                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False, na=False) | p_show['ID'].astype(str).str.contains(termo_busca, na=False)]
                 
                 if not p_show.empty:
                     event = st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
