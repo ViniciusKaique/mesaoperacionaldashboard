@@ -81,6 +81,11 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
                                     {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
+                
+                # === CORREÇÃO DE PERFORMANCE 1: LIMPAR CACHE APÓS EDICÃO ===
+                st.cache_data.clear() 
+                # ===========================================================
+
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
@@ -120,8 +125,11 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        df_resumo = conn.query(query_resumo, ttl=0, show_spinner=False)
-        df_pessoas = conn.query(query_funcionarios, ttl=0, show_spinner=False)
+        # === CORREÇÃO DE PERFORMANCE 2: ATIVAR CACHE (TTL=600) ===
+        # Antes estava ttl=0 (sem cache), agora ttl=600 (10 minutos de cache)
+        df_resumo = conn.query(query_resumo, ttl=600, show_spinner=False)
+        df_pessoas = conn.query(query_funcionarios, ttl=600, show_spinner=False)
+        # =========================================================
 
         # Processamento
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
@@ -256,6 +264,11 @@ if st.session_state.get("authentication_status"):
                             with conn.session as session:
                                 session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
                                 session.commit()
+                            
+                            # === CORREÇÃO DE PERFORMANCE 3: LIMPAR CACHE APÓS DATA ===
+                            st.cache_data.clear()
+                            # =========================================================
+
                             st.toast("Data salva!", icon="✅"); st.rerun()
 
                 st.markdown(f"""
