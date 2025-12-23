@@ -65,7 +65,6 @@ def buscar_dados_auxiliares(_conn):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_operacionais(_conn):
-    # OTIMIZAÇÃO #2: Cálculo matemático movido para o SQL para aliviar o Pandas
     query_resumo = """
     WITH ContagemReal AS (
         SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -104,9 +103,6 @@ def buscar_dados_operacionais(_conn):
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
 
-    # O processamento pesado de cálculo foi removido daqui e feito no SQL acima
-    
-    # Lógica visual permanece no Pandas (mais flexível para UI)
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     
     df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
@@ -139,7 +135,6 @@ def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
             colab_id = int(dados_colab['ID'])
             
             try:
-                # OTIMIZAÇÃO #3: Uso seguro de parâmetros (já estava correto aqui, mantido)
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
                                     {"uid": novo_uid, "cid": novo_cid, "ativo": novo_status, "id": colab_id})
@@ -150,9 +145,6 @@ def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
             except Exception as e: st.error(f"Erro: {e}")
 
 def acao_atualizar_data(unidade_id, nova_data, conn):
-    # OTIMIZAÇÃO #3: IMPLEMENTAÇÃO CRÍTICA DE SEGURANÇA
-    # Antes: f-string vulnerável a SQL Injection
-    # Agora: Parâmetros nomeados (bind parameters)
     try:
         with conn.session as session:
             session.execute(
@@ -270,10 +262,38 @@ def main():
                 mask &= df_resumo['Escola'].isin(match)
 
             df_final = df_resumo[mask]
-            st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
 
-            if not df_final.empty:
-                df_view = df_final.copy()
+            # --- OTIMIZAÇÃO DE STREAMLIT: PAGINAÇÃO ---
+            escolas_unicas = df_final['Escola'].unique()
+            total_escolas = len(escolas_unicas)
+            
+            c_info, c_pag = st.columns([2, 2])
+            with c_info:
+                st.info(f"**Encontradas {total_escolas} escolas.**")
+            
+            if total_escolas > 0:
+                ITENS_POR_PAGINA = 10
+                
+                # Se tivermos muitas escolas, criamos o paginador
+                if total_escolas > ITENS_POR_PAGINA:
+                    total_paginas = (total_escolas // ITENS_POR_PAGINA) + (1 if total_escolas % ITENS_POR_PAGINA > 0 else 0)
+                    with c_pag:
+                        pagina_atual = st.number_input(
+                            "Página:", 
+                            min_value=1, 
+                            max_value=total_paginas, 
+                            value=1, 
+                            step=1
+                        )
+                    
+                    inicio = (pagina_atual - 1) * ITENS_POR_PAGINA
+                    fim = inicio + ITENS_POR_PAGINA
+                    escolas_pagina = escolas_unicas[inicio:fim]
+                else:
+                    escolas_pagina = escolas_unicas
+
+                # Filtrar o dataframe para processar APENAS o que será desenhado (10 itens)
+                df_view = df_final[df_final['Escola'].isin(escolas_pagina)].copy()
                 
                 df_view = df_view.rename(columns={
                     'Diferenca_Display': 'Diferenca',
@@ -282,9 +302,11 @@ def main():
                 
                 df_view[['Edital', 'Real']] = df_view[['Edital', 'Real']].astype(str)
                 
-                df_view = df_view.sort_values('Escola')
+                # Garante ordem visual correta baseada na lista paginada
+                df_view['Escola'] = pd.Categorical(df_view['Escola'], categories=escolas_pagina, ordered=True)
+                df_view = df_view.sort_values(['Escola', 'Cargo'])
                 
-                escolas_agrupadas = df_view.groupby('Escola')
+                escolas_agrupadas = df_view.groupby('Escola', observed=True)
 
                 for nome_escola, df_escola_view in escolas_agrupadas:
                     
