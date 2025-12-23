@@ -6,13 +6,203 @@ import numpy as np
 from PIL import Image
 from sqlalchemy import text
 
-# ... (Mantenha as funções configurar_pagina, carregar_logo, realizar_login, 
-#      buscar_dados_auxiliares, buscar_dados_operacionais, dialog_editar_colaborador, 
-#      acao_atualizar_data, exibir_sidebar, exibir_metricas_topo, exibir_graficos_gerais 
-#      EXATAMENTE IGUAIS AO CÓDIGO ANTERIOR) ...
+# --- 1. CONFIGURAÇÃO E ESTILOS ---
+def configurar_pagina():
+    st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
+    st.markdown("""
+    <style>
+        .block-container { padding-top: 1rem; }
+        .stButton button { background-color: #ff4b4b; color: white; border-radius: 8px; }
+        [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
+        .dataframe { font-size: 14px !important; }
+        
+        th, td { text-align: center !important; }
+        .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
+            justify-content: center !important;
+            text-align: center !important;
+        }
 
-# Vou repetir apenas a função MAIN com a nova lógica de paginação no rodapé
+        div[data-testid="stSpinner"] > div {
+            font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
+        }
 
+        div.stButton > button { width: 100%; display: block; margin: 0 auto; }
+    </style>
+    """, unsafe_allow_html=True)
+
+def carregar_logo():
+    try: return Image.open("logo.png")
+    except: return None
+
+# --- 2. AUTENTICAÇÃO ---
+def realizar_login():
+    try:
+        auth_secrets = st.secrets["auth"]
+        config = {
+            'credentials': {'usernames': {auth_secrets["username"]: {'name': auth_secrets["name"], 'password': auth_secrets["password_hash"], 'email': auth_secrets["email"]}}},
+            'cookie': {'name': auth_secrets["cookie_name"], 'key': auth_secrets["cookie_key"], 'expiry_days': auth_secrets["cookie_expiry_days"]}
+        }
+        authenticator = stauth.Authenticate(config['credentials'], config['cookie']['name'], config['cookie']['key'], config['cookie']['expiry_days'])
+        
+        if not st.session_state.get("authentication_status"):
+            st.write(""); st.write(""); st.write(""); st.write(""); st.write("")
+            col_esq, col_centro, col_dir = st.columns([3, 2, 3])
+            with col_centro:
+                try: authenticator.login(location='main')
+                except: authenticator.login()
+            if st.session_state.get("authentication_status") is False:
+                with col_centro: st.error('Usuário ou senha incorretos')
+            return None, None
+            
+        return authenticator, st.session_state.get("name")
+        
+    except Exception as e:
+        st.error("Erro Crítico de Autenticação: Secrets não configurados."); st.stop()
+
+# --- 3. BANCO DE DADOS E QUERIES ---
+@st.cache_data(ttl=600, show_spinner=False)
+def buscar_dados_auxiliares(_conn):
+    df_unidades = _conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"')
+    df_cargos = _conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"')
+    return df_unidades, df_cargos
+
+@st.cache_data(ttl=600, show_spinner=False)
+def buscar_dados_operacionais(_conn):
+    query_resumo = """
+    WITH ContagemReal AS (
+        SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
+        FROM "Colaboradores"
+        WHERE "Ativo" = TRUE
+        GROUP BY "UnidadeID", "CargoID"
+    )
+    SELECT 
+        t."NomeTipo" AS "Tipo", 
+        u."UnidadeID", 
+        u."NomeUnidade" AS "Escola", 
+        u."DataConferencia",
+        s."NomeSupervisor" AS "Supervisor", 
+        c."NomeCargo" AS "Cargo", 
+        q."Quantidade" AS "Edital",
+        COALESCE(cr."QtdReal", 0) AS "Real",
+        (COALESCE(cr."QtdReal", 0) - q."Quantidade") AS "Diferenca_num"
+    FROM "QuadroEdital" q
+    JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
+    JOIN "Cargos" c ON q."CargoID" = c."CargoID"
+    JOIN "TiposUnidades" t ON u."TipoID" = t."TipoID"
+    JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
+    LEFT JOIN ContagemReal cr ON q."UnidadeID" = cr."UnidadeID" AND q."CargoID" = cr."CargoID"
+    ORDER BY u."NomeUnidade", c."NomeCargo";
+    """
+    
+    query_funcionarios = """
+    SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
+    FROM "Colaboradores" col
+    JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
+    JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+    WHERE col."Ativo" = TRUE
+    ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
+    """
+
+    df_resumo = _conn.query(query_resumo)
+    df_pessoas = _conn.query(query_funcionarios)
+
+    condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
+    
+    df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
+    df_resumo['Status_Codigo'] = np.select(condicoes, ['FALTA', 'EXCEDENTE'], default='OK')
+
+    df_resumo['Diferenca_Display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
+    df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
+    
+    return df_resumo, df_pessoas
+
+# --- 4. AÇÕES DE EDIÇÃO E UPDATE ---
+@st.dialog("✏️ Editar Colaborador")
+def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
+    st.write(f"Editando: **{dados_colab['Funcionario']}** (ID: {dados_colab['ID']})")
+    with st.form("form_edicao"):
+        lista_escolas = df_unidades['NomeUnidade'].tolist()
+        try: idx_escola = lista_escolas.index(dados_colab['Escola'])
+        except: idx_escola = 0
+        nova_escola = st.selectbox("🏫 Escola:", lista_escolas, index=idx_escola)
+
+        lista_cargos = df_cargos['NomeCargo'].tolist()
+        try: idx_cargo = lista_cargos.index(dados_colab['Cargo'])
+        except: idx_cargo = 0
+        novo_cargo = st.selectbox("💼 Cargo:", lista_cargos, index=idx_cargo)
+
+        novo_status = st.checkbox("✅ Ativo?", value=True)
+        
+        if st.form_submit_button("💾 Salvar Alterações"):
+            novo_uid = int(df_unidades[df_unidades['NomeUnidade'] == nova_escola]['UnidadeID'].iloc[0])
+            novo_cid = int(df_cargos[df_cargos['NomeCargo'] == novo_cargo]['CargoID'].iloc[0])
+            colab_id = int(dados_colab['ID'])
+            
+            try:
+                with conn.session as session:
+                    session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
+                                    {"uid": novo_uid, "cid": novo_cid, "ativo": novo_status, "id": colab_id})
+                    session.commit()
+                
+                st.cache_data.clear() 
+                st.toast("Atualizado!", icon="🎉"); st.rerun()
+            except Exception as e: st.error(f"Erro: {e}")
+
+def acao_atualizar_data(unidade_id, nova_data, conn):
+    try:
+        with conn.session as session:
+            session.execute(
+                text('UPDATE "Unidades" SET "DataConferencia" = :nova_data WHERE "UnidadeID" = :uid'),
+                {'nova_data': nova_data, 'uid': unidade_id}
+            )
+            session.commit()
+        st.cache_data.clear()
+        st.toast("Data salva!", icon="✅"); st.rerun()
+    except Exception as e:
+        st.error(f"Erro ao salvar data: {e}")
+
+# --- 5. COMPONENTES VISUAIS ---
+def exibir_sidebar(authenticator, nome_usuario):
+    with st.sidebar:
+        if logo := carregar_logo(): st.image(logo, use_container_width=True); st.divider()
+        st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Painel Gerencial + Detalhe")
+
+def exibir_metricas_topo(df):
+    c1, c2, c3 = st.columns(3)
+    total_edital = int(df['Edital'].sum())
+    total_real = int(df['Real'].sum())
+    saldo = total_real - total_edital
+    
+    with c1: st.markdown("**<div style='font-size:18px'>📋 Total Edital</div>**", unsafe_allow_html=True); st.metric("", total_edital)
+    with c2: st.markdown("**<div style='font-size:18px'>👥 Efetivo Atual</div>**", unsafe_allow_html=True); st.metric("", total_real)
+    with c3: st.markdown("**<div style='font-size:18px'>⚖️ Saldo Geral</div>**", unsafe_allow_html=True); st.metric("", saldo)
+    st.markdown("---")
+
+def exibir_graficos_gerais(df):
+    with st.expander("📈 Ver Gráficos e Resumo Geral", expanded=True):
+        df_agrupado = df.groupby('Cargo')[['Edital','Real']].sum().reset_index()
+        df_agrupado['Diff_Display'] = (df_agrupado['Real'] - df_agrupado['Edital']).apply(lambda x: f"+{x}" if x > 0 else str(x))
+        
+        c_g1, c_g2 = st.columns([2,1])
+        with c_g1: 
+            fig = px.bar(df_agrupado.melt(id_vars=['Cargo'], value_vars=['Edital','Real'], var_name='Tipo', value_name='Quantidade'), 
+                         x='Cargo', y='Quantidade', color='Tipo', barmode='group', 
+                         color_discrete_map={'Edital': '#808080','Real': '#00bfff'}, text_auto=True, template="seaborn")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with c_g2: 
+            def estilo_tabela(row):
+                styles = ['text-align: center;'] * 4
+                val = str(row['Diferenca'])
+                if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                else: styles[3] += 'color: #00c853; font-weight: bold;'
+                return styles
+            
+            df_display = df_agrupado[['Cargo','Edital','Real','Diff_Display']].rename(columns={'Diff_Display':'Diferenca'})
+            st.dataframe(df_display.style.apply(estilo_tabela, axis=1), use_container_width=True, hide_index=True)
+
+# --- 6. FUNÇÃO PRINCIPAL ---
 def main():
     configurar_pagina()
     authenticator, nome_usuario = realizar_login()
@@ -32,7 +222,7 @@ def main():
 
             st.markdown("---"); st.subheader("🏫 Detalhe por Escola")
 
-            # Filtros
+            # --- FILTROS ---
             c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
             with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
             with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
@@ -47,7 +237,7 @@ def main():
                     if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": 
                         filtro_comb[cargo] = sel
 
-            # Aplicação dos Filtros
+            # --- APLICAÇÃO DOS FILTROS ---
             mask = pd.Series([True] * len(df_resumo))
             if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
             if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
@@ -79,12 +269,12 @@ def main():
 
             df_final = df_resumo[mask]
 
-            # --- LÓGICA DE PAGINAÇÃO (STATE) ---
+            # --- PAGINAÇÃO E RENDERIZAÇÃO ---
             escolas_unicas = df_final['Escola'].unique()
             total_escolas = len(escolas_unicas)
             ITENS_POR_PAGINA = 10
             
-            # Inicializa a variável de página na memória se não existir
+            # Inicializa página na sessão
             if 'pagina_atual' not in st.session_state:
                 st.session_state.pagina_atual = 1
 
@@ -93,16 +283,13 @@ def main():
             if total_escolas > 0:
                 total_paginas = (total_escolas // ITENS_POR_PAGINA) + (1 if total_escolas % ITENS_POR_PAGINA > 0 else 0)
                 
-                # Garante que a página atual é válida (ex: se filtrou e a pagina 10 não existe mais, volta pra 1)
                 if st.session_state.pagina_atual > total_paginas:
                     st.session_state.pagina_atual = 1
                 
-                # Define o slice (fatia) dos dados baseado na página atual da memória
                 inicio = (st.session_state.pagina_atual - 1) * ITENS_POR_PAGINA
                 fim = inicio + ITENS_POR_PAGINA
                 escolas_pagina = escolas_unicas[inicio:fim]
 
-                # Filtra e prepara visualização
                 df_view = df_final[df_final['Escola'].isin(escolas_pagina)].copy()
                 df_view = df_view.rename(columns={'Diferenca_Display': 'Diferenca', 'Status_Display': 'Status'})
                 df_view[['Edital', 'Real']] = df_view[['Edital', 'Real']].astype(str)
@@ -111,9 +298,7 @@ def main():
                 
                 escolas_agrupadas = df_view.groupby('Escola', observed=True)
 
-                # --- LOOP DE RENDERIZAÇÃO ---
                 for nome_escola, df_escola_view in escolas_agrupadas:
-                    # ... (MANTENHA O CONTEÚDO DO LOOP IGUAL AO ANTERIOR: Variáveis, Expander, Tabelas) ...
                     primeira_linha = df_escola_view.iloc[0]
                     nome_supervisor = primeira_linha['Supervisor']
                     unidade_id = int(primeira_linha['UnidadeID'])
