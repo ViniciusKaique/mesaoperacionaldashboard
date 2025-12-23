@@ -6,29 +6,70 @@ import numpy as np
 from PIL import Image
 from sqlalchemy import text
 
+# --- CONFIGURAÇÕES GERAIS E CORES ---
+CORES = {
+    "red": "#ff4b4b",
+    "blue": "#29b6f6",
+    "green": "#00c853",
+    "yellow": "#ffa726"
+}
+
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
-    st.markdown("""
+    st.markdown(f"""
     <style>
-        .block-container { padding-top: 1rem; }
-        .stButton button { background-color: #ff4b4b; color: white; border-radius: 8px; }
-        [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
-        .dataframe { font-size: 14px !important; }
+        .block-container {{ padding-top: 1rem; }}
+        .stButton button {{ background-color: {CORES['red']}; color: white; border-radius: 8px; }}
+        [data-testid="stMetricValue"] {{ font-size: 32px; font-weight: bold; }}
+        .dataframe {{ font-size: 14px !important; }}
         
-        th, td { text-align: center !important; }
-        .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
+        th, td {{ text-align: center !important; }}
+        .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {{
             justify-content: center !important;
             text-align: center !important;
-        }
+        }}
 
-        div[data-testid="stSpinner"] > div {
-            font-size: 28px !important; font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
-        }
+        div[data-testid="stSpinner"] > div {{
+            font-size: 28px !important; font-weight: bold !important; color: {CORES['red']} !important; white-space: nowrap;
+        }}
 
-        div.stButton > button { width: 100%; display: block; margin: 0 auto; }
+        div.stButton > button {{ width: 100%; display: block; margin: 0 auto; }}
     </style>
     """, unsafe_allow_html=True)
 
+# --- FUNÇÕES AUXILIARES DE ESTILO (REUTILIZÁVEIS) ---
+def obter_cor_texto(texto):
+    txt = str(texto)
+    if '-' in txt or '🔴' in txt or 'FALTA' in txt: return CORES['red']
+    if '+' in txt or '🔵' in txt or 'EXCEDENTE' in txt: return CORES['blue']
+    if '🟡' in txt or 'AJUSTE' in txt: return CORES['yellow']
+    return CORES['green']
+
+def aplicar_estilo_visual(row):
+    # Cria uma lista de estilos vazia baseada no tamanho da linha
+    styles = ['text-align: center;'] * len(row)
+    
+    # Aplica cor na coluna 'Diferenca' (assumindo que ela existe na row)
+    if 'Diferenca' in row:
+        idx = row.index.get_loc('Diferenca')
+        cor = obter_cor_texto(row['Diferenca'])
+        styles[idx] += f'color: {cor}; font-weight: bold;'
+
+    # Aplica cor na coluna 'Status' se ela existir
+    if 'Status' in row:
+        idx = row.index.get_loc('Status')
+        cor = obter_cor_texto(row['Status'])
+        styles[idx] += f'color: {cor}; font-weight: bold;'
+        
+    return styles
+
+def calcular_status_visual(saldo, lista_status_cod):
+    if saldo > 0: return "🔵", CORES['blue'], "+"
+    if saldo < 0: return "🔴", CORES['red'], ""
+    if saldo == 0 and any(s != 'OK' for s in lista_status_cod): return "🟡", "orange", "" # orange padrão html ou use CORES['yellow']
+    return "✅", "green", ""
+
+# --- FUNÇÕES DE CARREGAMENTO E DADOS ---
 def carregar_logo():
     try: return Image.open("logo.png")
     except: return None
@@ -65,7 +106,6 @@ def buscar_dados_auxiliares(_conn):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_operacionais(_conn):
-    # OTIMIZAÇÃO #2: Cálculo matemático movido para o SQL para aliviar o Pandas
     query_resumo = """
     WITH ContagemReal AS (
         SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -104,9 +144,6 @@ def buscar_dados_operacionais(_conn):
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
 
-    # O processamento pesado de cálculo foi removido daqui e feito no SQL acima
-    
-    # Lógica visual permanece no Pandas (mais flexível para UI)
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     
     df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
@@ -139,7 +176,6 @@ def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
             colab_id = int(dados_colab['ID'])
             
             try:
-                # OTIMIZAÇÃO #3: Uso seguro de parâmetros (já estava correto aqui, mantido)
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
                                     {"uid": novo_uid, "cid": novo_cid, "ativo": novo_status, "id": colab_id})
@@ -150,9 +186,6 @@ def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
             except Exception as e: st.error(f"Erro: {e}")
 
 def acao_atualizar_data(unidade_id, nova_data, conn):
-    # OTIMIZAÇÃO #3: IMPLEMENTAÇÃO CRÍTICA DE SEGURANÇA
-    # Antes: f-string vulnerável a SQL Injection
-    # Agora: Parâmetros nomeados (bind parameters)
     try:
         with conn.session as session:
             session.execute(
@@ -190,20 +223,13 @@ def exibir_graficos_gerais(df):
         with c_g1: 
             fig = px.bar(df_agrupado.melt(id_vars=['Cargo'], value_vars=['Edital','Real'], var_name='Tipo', value_name='Quantidade'), 
                          x='Cargo', y='Quantidade', color='Tipo', barmode='group', 
-                         color_discrete_map={'Edital': '#808080','Real': '#00bfff'}, text_auto=True, template="seaborn")
+                         color_discrete_map={'Edital': '#808080','Real': CORES['blue']}, text_auto=True, template="seaborn")
             st.plotly_chart(fig, use_container_width=True)
         
         with c_g2: 
-            def estilo_tabela(row):
-                styles = ['text-align: center;'] * 4
-                val = str(row['Diferenca'])
-                if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-                elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-                else: styles[3] += 'color: #00c853; font-weight: bold;'
-                return styles
-            
+            # Reutiliza a função de estilo única
             df_display = df_agrupado[['Cargo','Edital','Real','Diff_Display']].rename(columns={'Diff_Display':'Diferenca'})
-            st.dataframe(df_display.style.apply(estilo_tabela, axis=1), use_container_width=True, hide_index=True)
+            st.dataframe(df_display.style.apply(aplicar_estilo_visual, axis=1), use_container_width=True, hide_index=True)
 
 def main():
     configurar_pagina()
@@ -248,7 +274,6 @@ def main():
                 }).reset_index()
                 
                 agg['Saldo'] = agg['Real'] - agg['Edital']
-                
                 condicoes_agg = [
                     agg['Saldo'] > 0,
                     agg['Saldo'] < 0,
@@ -256,7 +281,6 @@ def main():
                 ]
                 escolhas_agg = ["🔵 EXCEDENTE", "🔴 FALTA", "🟡 AJUSTE"]
                 agg['Status_Calculado'] = np.select(condicoes_agg, escolhas_agg, default="🟢 OK")
-                
                 escolas_alvo = agg[agg['Status_Calculado'] == filtro_situacao]['Escola']
                 mask &= df_resumo['Escola'].isin(escolas_alvo)
 
@@ -274,22 +298,14 @@ def main():
 
             if not df_final.empty:
                 df_view = df_final.copy()
-                
-                df_view = df_view.rename(columns={
-                    'Diferenca_Display': 'Diferenca',
-                    'Status_Display': 'Status'
-                })
-                
+                df_view = df_view.rename(columns={'Diferenca_Display': 'Diferenca', 'Status_Display': 'Status'})
                 df_view[['Edital', 'Real']] = df_view[['Edital', 'Real']].astype(str)
-                
                 df_view = df_view.sort_values('Escola')
                 
                 escolas_agrupadas = df_view.groupby('Escola')
 
                 for nome_escola, df_escola_view in escolas_agrupadas:
-                    
                     primeira_linha = df_escola_view.iloc[0]
-                    
                     nome_supervisor = primeira_linha['Supervisor']
                     unidade_id = int(primeira_linha['UnidadeID'])
                     data_atual = primeira_linha['DataConferencia']
@@ -299,13 +315,8 @@ def main():
                     total_real_esc = int(pd.to_numeric(df_escola_view['Real']).sum())
                     saldo_esc = total_real_esc - total_edital_esc
                     
-                    cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
-                    sinal_saldo = "+" if saldo_esc > 0 else ""
-                    
-                    icone = "✅"
-                    if saldo_esc > 0: icone = "🔵"
-                    elif saldo_esc < 0: icone = "🔴"
-                    elif saldo_esc == 0 and any(s != 'OK' for s in lista_status_cod): icone = "🟡"
+                    # Função Auxiliar substitui lógica complexa
+                    icone, cor_saldo, sinal_saldo = calcular_status_visual(saldo_esc, lista_status_cod)
 
                     with st.expander(f"{icone} {nome_escola}", expanded=False):
                         c_sup, c_btn = st.columns([3, 1.5])
@@ -327,22 +338,10 @@ def main():
                         """, unsafe_allow_html=True)
 
                         st.markdown("#### 📊 Quadro de Vagas")
-                        
                         df_tabela_final = df_escola_view[['Cargo','Edital','Real','Diferenca','Status']]
                         
-                        def estilo_linha_escola(row):
-                            styles = ['text-align: center;'] * 5
-                            val = str(row['Diferenca'])
-                            if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-                            elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-                            else: styles[3] += 'color: #00c853; font-weight: bold;'
-                            stt = str(row['Status'])
-                            if '🔴' in stt: styles[4] += 'color: #ff4b4b; font-weight: bold;'
-                            elif '🔵' in stt: styles[4] += 'color: #29b6f6; font-weight: bold;'
-                            else: styles[4] += 'color: #00c853; font-weight: bold;'
-                            return styles
-                        
-                        st.dataframe(df_tabela_final.style.apply(estilo_linha_escola, axis=1), use_container_width=True, hide_index=True)
+                        # Reutiliza a mesma função de estilo usada nos gráficos
+                        st.dataframe(df_tabela_final.style.apply(aplicar_estilo_visual, axis=1), use_container_width=True, hide_index=True)
 
                         st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                         df_pessoas_escola = df_pessoas[df_pessoas['Escola'] == nome_escola]
