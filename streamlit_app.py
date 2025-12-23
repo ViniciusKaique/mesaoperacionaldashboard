@@ -6,7 +6,6 @@ import numpy as np
 from PIL import Image
 from sqlalchemy import text
 
-# --- 1. CONFIGURAÇÃO E ESTILO ---
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
     st.markdown("""
@@ -34,7 +33,6 @@ def carregar_logo():
     try: return Image.open("logo.png")
     except: return None
 
-# --- 2. AUTENTICAÇÃO ---
 def realizar_login():
     try:
         auth_secrets = st.secrets["auth"]
@@ -59,19 +57,15 @@ def realizar_login():
     except Exception as e:
         st.error("Erro Crítico de Autenticação: Secrets não configurados."); st.stop()
 
-# --- 3. DADOS (BANCO DE DADOS) ---
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_auxiliares(_conn):
-    """Busca listas de Unidades e Cargos para os dropdowns de edição."""
     df_unidades = _conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"')
     df_cargos = _conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"')
     return df_unidades, df_cargos
 
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_operacionais(_conn):
-    """Busca os dados principais do painel usando SQL Otimizado."""
     
-    # Query Inteligente (CTE + Left Join)
     query_resumo = """
     WITH ContagemReal AS (
         SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -109,22 +103,18 @@ def buscar_dados_operacionais(_conn):
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
 
-    # --- PROCESSAMENTO RÁPIDO (NUMPY) ---
     df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
     
-    # Lógica de Status Vetorizada (Instantânea)
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     
     df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
     df_resumo['Status_Codigo'] = np.select(condicoes, ['FALTA', 'EXCEDENTE'], default='OK')
 
-    # Formatação Visual
     df_resumo['Diferenca_Display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
     df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
     
     return df_resumo, df_pessoas
 
-# --- 4. AÇÕES E DIÁLOGOS ---
 @st.dialog("✏️ Editar Colaborador")
 def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
     st.write(f"Editando: **{dados_colab['Funcionario']}** (ID: {dados_colab['ID']})")
@@ -163,14 +153,12 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
     st.cache_data.clear()
     st.toast("Data salva!", icon="✅"); st.rerun()
 
-# --- 5. COMPONENTES VISUAIS (UI) ---
 def exibir_sidebar(authenticator, nome_usuario):
     with st.sidebar:
         if logo := carregar_logo(): st.image(logo, use_container_width=True); st.divider()
         st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Painel Gerencial + Detalhe")
 
 def exibir_metricas_topo(df):
-    """Renderiza os KPIs (Key Performance Indicators) no topo."""
     c1, c2, c3 = st.columns(3)
     total_edital = int(df['Edital'].sum())
     total_real = int(df['Real'].sum())
@@ -202,11 +190,9 @@ def exibir_graficos_gerais(df):
                 else: styles[3] += 'color: #00c853; font-weight: bold;'
                 return styles
             
-            # Formata para exibição
             df_display = df_agrupado[['Cargo','Edital','Real','Diff_Display']].rename(columns={'Diff_Display':'Diferenca'})
             st.dataframe(df_display.style.apply(estilo_tabela, axis=1), use_container_width=True, hide_index=True)
 
-# --- EXECUÇÃO PRINCIPAL (MAIN) ---
 def main():
     configurar_pagina()
     authenticator, nome_usuario = realizar_login()
@@ -217,25 +203,21 @@ def main():
         try:
             conn = st.connection("postgres", type="sql")
             
-            # 1. Busca de Dados
             df_unidades, df_cargos = buscar_dados_auxiliares(conn)
             df_resumo, df_pessoas = buscar_dados_operacionais(conn)
             
-            # 2. Exibição Topo
             st.title("📊 Mesa Operacional")
             exibir_metricas_topo(df_resumo)
             exibir_graficos_gerais(df_resumo)
 
             st.markdown("---"); st.subheader("🏫 Detalhe por Escola")
 
-            # --- 3. FILTROS ---
             c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
             with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
             with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
             with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
             with c_f4: termo_busca = st.text_input("👤 Buscar Colaborador:", "")
 
-            # Filtros de Cargos
             lista_cargos = list(df_resumo['Cargo'].unique())
             filtro_comb = {}
             cols = st.columns(5)
@@ -244,12 +226,10 @@ def main():
                     if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": 
                         filtro_comb[cargo] = sel
 
-            # --- 4. APLICAÇÃO DOS FILTROS ---
             mask = pd.Series([True] * len(df_resumo))
             if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
             if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
             
-            # Lógica de Situação Otimizada (Grouped Aggregation)
             if filtro_situacao != "Todas":
                 agg = df_resumo.groupby('Escola').agg({
                     'Edital': 'sum', 'Real': 'sum', 'Status_Codigo': list
@@ -280,52 +260,33 @@ def main():
             df_final = df_resumo[mask]
             st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
 
-            # --- 5. OTIMIZAÇÃO (IDEIA 1): PRÉ-PROCESSAMENTO GLOBAL ---
-            # Prepara os dados de exibição UMA vez, fora do loop
             if not df_final.empty:
-                # Criamos um DataFrame de "View" (Visualização)
                 df_view = df_final.copy()
                 
-                # Renomear colunas para exibição final (PT-BR)
                 df_view = df_view.rename(columns={
                     'Diferenca_Display': 'Diferenca',
                     'Status_Display': 'Status'
                 })
                 
-                # Converter numéricos para string (para não ter vírgula em milhar)
                 df_view[['Edital', 'Real']] = df_view[['Edital', 'Real']].astype(str)
                 
-                # Ordena antes de agrupar para garantir a ordem visual
                 df_view = df_view.sort_values('Escola')
                 
-                # --- LOOP OTIMIZADO (GROUPBY) ---
                 escolas_agrupadas = df_view.groupby('Escola')
 
                 for nome_escola, df_escola_view in escolas_agrupadas:
                     
-                    # Como usamos df_view, os dados já estão formatados!
-                    # Mas precisamos dos dados brutos (int/date) para lógica de negócio (saldo/data)
-                    # Pegamos a primeira linha do df_view (que mantém colunas originais que não renomeamos/deletamos)
                     primeira_linha = df_escola_view.iloc[0]
-                    
-                    # Para cálculos, usamos as colunas originais que ainda existem no df_view
-                    # (Nota: O rename acima só renomeou Diferenca_Display e Status_Display)
-                    # (Nota 2: Edital/Real viraram string, então para conta convertemos de volta ou usamos o df_final original filtrado)
-                    
-                    # Abordagem Híbrida Segura: Usar df_final original para lógica, df_view para exibir
-                    # Mas para performance máxima, vamos extrair do view mesmo (convertendo de volta o que precisar)
                     
                     nome_supervisor = primeira_linha['Supervisor']
                     unidade_id = int(primeira_linha['UnidadeID'])
                     data_atual = primeira_linha['DataConferencia']
                     lista_status_cod = df_escola_view['Status_Codigo'].tolist()
                     
-                    # Totais (Convertendo de volta de string para int é rápido para 1 linha)
                     total_edital_esc = int(pd.to_numeric(df_escola_view['Edital']).sum())
                     total_real_esc = int(pd.to_numeric(df_escola_view['Real']).sum())
                     saldo_esc = total_real_esc - total_edital_esc
                     
-                    # Auxiliares Visuais
                     cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
                     sinal_saldo = "+" if saldo_esc > 0 else ""
                     
@@ -334,7 +295,6 @@ def main():
                     elif saldo_esc < 0: icone = "🔴"
                     elif saldo_esc == 0 and any(s != 'OK' for s in lista_status_cod): icone = "🟡"
 
-                    # --- CARD DA ESCOLA ---
                     with st.expander(f"{icone} {nome_escola}", expanded=False):
                         c_sup, c_btn = st.columns([3, 1.5])
                         with c_sup: st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
@@ -354,10 +314,8 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
 
-                        # Tabela de Cargos (JÁ FORMATADA NO PRÉ-PROCESSAMENTO)
                         st.markdown("#### 📊 Quadro de Vagas")
                         
-                        # Apenas selecionamos as colunas finais
                         df_tabela_final = df_escola_view[['Cargo','Edital','Real','Diferenca','Status']]
                         
                         def estilo_linha_escola(row):
@@ -374,11 +332,9 @@ def main():
                         
                         st.dataframe(df_tabela_final.style.apply(estilo_linha_escola, axis=1), use_container_width=True, hide_index=True)
 
-                        # Tabela de Pessoas
                         st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                         df_pessoas_escola = df_pessoas[df_pessoas['Escola'] == nome_escola]
                         
-                        # Filtro de busca aplicado também na tabela interna
                         if termo_busca:
                             df_pessoas_escola = df_pessoas_escola[df_pessoas_escola['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas_escola['ID'].astype(str).str.contains(termo_busca, na=False)]
                         
