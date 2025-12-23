@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import pandas as pd
 import plotly.express as px
+import numpy as np  # <--- IMPORTANTE: Adicionado para otimização
 from PIL import Image
 from sqlalchemy import text
 
@@ -82,10 +83,7 @@ def editar_colaborador(colab_data, df_unidades_all, df_cargos_all, conn):
                                     {"uid": novo_unidade_id, "cid": novo_cargo_id, "ativo": novo_status, "id": colab_id})
                     session.commit()
                 
-                # === CORREÇÃO DE PERFORMANCE 1: LIMPAR CACHE APÓS EDICÃO ===
                 st.cache_data.clear() 
-                # ===========================================================
-
                 st.toast("Atualizado!", icon="🎉"); st.rerun()
             except Exception as e: st.error(f"Erro: {e}")
 
@@ -103,19 +101,32 @@ if st.session_state.get("authentication_status"):
         df_unidades_all = conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"', ttl=600, show_spinner=False)
         df_cargos_all = conn.query('SELECT "CargoID", "NomeCargo" FROM "Cargos" ORDER BY "NomeCargo"', ttl=600, show_spinner=False)
 
-        # Queries
+        # --- OTIMIZAÇÃO 1: QUERY REESCRITA (Removida subquery correlacionada) ---
         query_resumo = """
+        WITH ContagemReal AS (
+            SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
+            FROM "Colaboradores"
+            WHERE "Ativo" = TRUE
+            GROUP BY "UnidadeID", "CargoID"
+        )
         SELECT 
-            t."NomeTipo" AS "Tipo", u."UnidadeID", u."NomeUnidade" AS "Escola", u."DataConferencia",
-            s."NomeSupervisor" AS "Supervisor", c."NomeCargo" AS "Cargo", q."Quantidade" AS "Edital",
-            (SELECT COUNT(*) FROM "Colaboradores" col WHERE col."UnidadeID" = u."UnidadeID" AND col."CargoID" = c."CargoID" AND col."Ativo" = TRUE) AS "Real"
+            t."NomeTipo" AS "Tipo", 
+            u."UnidadeID", 
+            u."NomeUnidade" AS "Escola", 
+            u."DataConferencia",
+            s."NomeSupervisor" AS "Supervisor", 
+            c."NomeCargo" AS "Cargo", 
+            q."Quantidade" AS "Edital",
+            COALESCE(cr."QtdReal", 0) AS "Real"
         FROM "QuadroEdital" q
         JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
         JOIN "Cargos" c ON q."CargoID" = c."CargoID"
         JOIN "TiposUnidades" t ON u."TipoID" = t."TipoID"
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
+        LEFT JOIN ContagemReal cr ON q."UnidadeID" = cr."UnidadeID" AND q."CargoID" = cr."CargoID"
         ORDER BY u."NomeUnidade", c."NomeCargo";
         """
+        
         query_funcionarios = """
         SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
         FROM "Colaboradores" col
@@ -125,24 +136,28 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
         """
 
-        # === CORREÇÃO DE PERFORMANCE 2: ATIVAR CACHE (TTL=600) ===
-        # Antes estava ttl=0 (sem cache), agora ttl=600 (10 minutos de cache)
         df_resumo = conn.query(query_resumo, ttl=600, show_spinner=False)
         df_pessoas = conn.query(query_funcionarios, ttl=600, show_spinner=False)
-        # =========================================================
 
-        # Processamento
+        # --- OTIMIZAÇÃO 2: PROCESSAMENTO VETORIZADO (NUMPY) ---
         df_resumo['Diferenca_num'] = df_resumo['Real'] - df_resumo['Edital']
+        
+        # Definição de condições para vetorização
+        condicoes = [
+            df_resumo['Diferenca_num'] < 0,
+            df_resumo['Diferenca_num'] > 0
+        ]
+        # Escolhas correspondentes
+        escolhas_display = ['🔴 FALTA', '🔵 EXCEDENTE']
+        escolhas_status = ['FALTA', 'EXCEDENTE']
+        
+        # Aplicação vetorial (muito mais rápida que apply)
+        df_resumo['Status_display'] = np.select(condicoes, escolhas_display, default='🟢 OK')
+        df_resumo['Status'] = np.select(condicoes, escolhas_status, default='OK')
+
+        # Formatação de string apenas para visualização
         df_resumo['Diferenca_display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
         df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
-
-        def define_status(row):
-            diff = row['Diferenca_num']; 
-            if diff < 0: return '🔴 FALTA'
-            elif diff > 0: return '🔵 EXCEDENTE'
-            return '🟢 OK'
-        df_resumo['Status_display'] = df_resumo.apply(define_status, axis=1)
-        df_resumo['Status'] = df_resumo['Status_display'].apply(lambda x: x.split(' ')[1])
 
         # === DASHBOARD ===
         st.title("📊 Mesa Operacional")
@@ -184,31 +199,20 @@ if st.session_state.get("authentication_status"):
         if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
         if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
         
-        # === LÓGICA DE FILTRAGEM CORRIGIDA (Baseada no Saldo) ===
+        # Lógica de Filtragem (Mantida igual, porém otimizada pelo uso do df_resumo vetorizado)
         if filtro_situacao != "Todas":
             escolas_filtro_status = []
             for escola in df_resumo['Escola'].unique():
                 df_e = df_resumo[df_resumo['Escola'] == escola]
-                
-                total_edital_e = df_e['Edital'].sum()
-                total_real_e = df_e['Real'].sum()
-                saldo_e = total_real_e - total_edital_e
+                saldo_e = df_e['Real'].sum() - df_e['Edital'].sum()
                 status_list = df_e['Status'].tolist()
                 
                 status_escola = "🟢 OK"
+                if saldo_e > 0: status_escola = "🔵 EXCEDENTE"
+                elif saldo_e < 0: status_escola = "🔴 FALTA"
+                elif saldo_e == 0 and any(s != 'OK' for s in status_list): status_escola = "🟡 AJUSTE"
                 
-                # 1. Prioridade: Saldo > 0 é EXCEDENTE (mesmo se tiver falta interna)
-                if saldo_e > 0:
-                    status_escola = "🔵 EXCEDENTE"
-                # 2. Prioridade: Saldo < 0 é FALTA
-                elif saldo_e < 0:
-                    status_escola = "🔴 FALTA"
-                # 3. Prioridade: Saldo == 0 mas cargos errados é AJUSTE
-                elif saldo_e == 0 and any(s != 'OK' for s in status_list):
-                    status_escola = "🟡 AJUSTE"
-                
-                if status_escola == filtro_situacao:
-                    escolas_filtro_status.append(escola)
+                if status_escola == filtro_situacao: escolas_filtro_status.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_filtro_status)
 
         if filtro_comb:
@@ -221,92 +225,101 @@ if st.session_state.get("authentication_status"):
                     if row.empty or row['Status'].iloc[0] != s: valid = False; break
                 if valid: escolas_validas.append(escola)
             mask &= df_resumo['Escola'].isin(escolas_validas)
+            
         if termo_busca:
             match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca, na=False)]['Escola'].unique()
             mask &= df_resumo['Escola'].isin(match)
 
         df_final = df_resumo[mask]
-        st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
+        escolas_unicas = sorted(df_final['Escola'].unique())
 
-        # === LOOP ESCOLAS ===
-        for escola in df_final['Escola'].unique():
-            df_e = df_final[df_final['Escola'] == escola].copy()
-            status_list = df_e['Status'].tolist()
-            nome_supervisor = df_e['Supervisor'].iloc[0]
-            unidade_id = int(df_e['UnidadeID'].iloc[0])
-            data_atual = df_e['DataConferencia'].iloc[0]
+        st.info(f"**Encontradas {len(escolas_unicas)} escolas (Exibindo 10 por página).**")
+
+        # --- OTIMIZAÇÃO 3: PAGINAÇÃO (Impede travamento do navegador) ---
+        if len(escolas_unicas) > 0:
+            col_pag, _ = st.columns([2, 8])
+            itens_por_pagina = 10
+            with col_pag:
+                total_paginas = max(1, (len(escolas_unicas) - 1) // itens_por_pagina + 1)
+                pagina_atual = st.number_input("📄 Página", min_value=1, max_value=total_paginas, value=1)
             
-            # Totais
-            total_edital_esc = int(df_e['Edital'].sum())
-            total_real_esc = int(df_e['Real'].sum())
-            saldo_esc = total_real_esc - total_edital_esc
-            cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
-            sinal_saldo = "+" if saldo_esc > 0 else ""
+            inicio = (pagina_atual - 1) * itens_por_pagina
+            fim = inicio + itens_por_pagina
+            escolas_para_mostrar = escolas_unicas[inicio:fim]
 
-            # === LÓGICA DO ÍCONE CORRIGIDA (IGUAL AO FILTRO) ===
-            icon = "✅"
-            if saldo_esc > 0:
-                icon = "🔵" # Excedente (Prioridade máxima se saldo positivo)
-            elif saldo_esc < 0:
-                icon = "🔴" # Falta (Prioridade máxima se saldo negativo)
-            elif saldo_esc == 0 and any(s != 'OK' for s in status_list):
-                icon = "🟡" # Ajuste
-
-            with st.expander(f"{icon} {escola}", expanded=False):
-                c_sup, c_btn = st.columns([3, 1.5])
-                with c_sup: st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
-                with c_btn:
-                    label_botao = "⚠️ Pendente" if pd.isnull(data_atual) else f"📅 Conferido: {data_atual.strftime('%d/%m/%Y')}"
-                    with st.popover(label_botao, use_container_width=True):
-                        st.markdown("Alterar data")
-                        nova_data = st.date_input("Nova Data:", value=pd.Timestamp.today() if pd.isnull(data_atual) else data_atual, format="DD/MM/YYYY", key=f"dt_{unidade_id}")
-                        if st.button("💾 Salvar", key=f"save_{unidade_id}"):
-                            with conn.session as session:
-                                session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
-                                session.commit()
-                            
-                            # === CORREÇÃO DE PERFORMANCE 3: LIMPAR CACHE APÓS DATA ===
-                            st.cache_data.clear()
-                            # =========================================================
-
-                            st.toast("Data salva!", icon="✅"); st.rerun()
-
-                st.markdown(f"""
-                <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 5px 0 15px 0; border: 1px solid #404040;'>
-                    <span>📋 Edital: <b>{total_edital_esc}</b></span>
-                    <span>👥 Real: <b>{total_real_esc}</b></span>
-                    <span>⚖️ Saldo: <b style='color: {cor_saldo}'>{sinal_saldo}{saldo_esc}</b></span>
-                </div>
-                """, unsafe_allow_html=True)
-
-                st.markdown("#### 📊 Quadro de Vagas")
-                d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
-                d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
-                def style_escola(row):
-                    styles = ['text-align: center;'] * 5
-                    val = str(row['Diferenca'])
-                    if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-                    elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-                    else: styles[3] += 'color: #00c853; font-weight: bold;'
-                    stt = str(row['Status'])
-                    if '🔴' in stt: styles[4] += 'color: #ff4b4b; font-weight: bold;'
-                    elif '🔵' in stt: styles[4] += 'color: #29b6f6; font-weight: bold;'
-                    else: styles[4] += 'color: #00c853; font-weight: bold;'
-                    return styles
-                st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
-
-                st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
-                p_show = df_pessoas[df_pessoas['Escola'] == escola]
-                if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False, na=False) | p_show['ID'].astype(str).str.contains(termo_busca, na=False)]
+            # === LOOP ESCOLAS (Paginado) ===
+            for escola in escolas_para_mostrar:
+                df_e = df_final[df_final['Escola'] == escola].copy()
+                status_list = df_e['Status'].tolist()
+                nome_supervisor = df_e['Supervisor'].iloc[0]
+                unidade_id = int(df_e['UnidadeID'].iloc[0])
+                data_atual = df_e['DataConferencia'].iloc[0]
                 
-                if not p_show.empty:
-                    event = st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
-                    if len(event.selection.rows) > 0:
-                        idx_selecionado = event.selection.rows[0]
-                        dados_colaborador = p_show.iloc[idx_selecionado]
-                        editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
-                else:
-                    st.warning("Nenhum colaborador encontrado.")
+                total_edital_esc = int(df_e['Edital'].sum())
+                total_real_esc = int(df_e['Real'].sum())
+                saldo_esc = total_real_esc - total_edital_esc
+                cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
+                sinal_saldo = "+" if saldo_esc > 0 else ""
+
+                icon = "✅"
+                if saldo_esc > 0: icon = "🔵"
+                elif saldo_esc < 0: icon = "🔴"
+                elif saldo_esc == 0 and any(s != 'OK' for s in status_list): icon = "🟡"
+
+                with st.expander(f"{icon} {escola}", expanded=False):
+                    c_sup, c_btn = st.columns([3, 1.5])
+                    with c_sup: st.markdown(f"**👨‍💼 Supervisor:** {nome_supervisor}")
+                    with c_btn:
+                        label_botao = "⚠️ Pendente" if pd.isnull(data_atual) else f"📅 Conferido: {data_atual.strftime('%d/%m/%Y')}"
+                        with st.popover(label_botao, use_container_width=True):
+                            st.markdown("Alterar data")
+                            nova_data = st.date_input("Nova Data:", value=pd.Timestamp.today() if pd.isnull(data_atual) else data_atual, format="DD/MM/YYYY", key=f"dt_{unidade_id}")
+                            if st.button("💾 Salvar", key=f"save_{unidade_id}"):
+                                with conn.session as session:
+                                    session.execute(text(f"UPDATE \"Unidades\" SET \"DataConferencia\" = '{nova_data}' WHERE \"UnidadeID\" = {unidade_id};"))
+                                    session.commit()
+                                st.cache_data.clear()
+                                st.toast("Data salva!", icon="✅"); st.rerun()
+
+                    st.markdown(f"""
+                    <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 5px 0 15px 0; border: 1px solid #404040;'>
+                        <span>📋 Edital: <b>{total_edital_esc}</b></span>
+                        <span>👥 Real: <b>{total_real_esc}</b></span>
+                        <span>⚖️ Saldo: <b style='color: {cor_saldo}'>{sinal_saldo}{saldo_esc}</b></span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    st.markdown("#### 📊 Quadro de Vagas")
+                    d_show = df_e[['Cargo','Edital','Real','Diferenca_display','Status_display']].rename(columns={'Diferenca_display':'Diferenca','Status_display':'Status'})
+                    d_show[['Edital','Real']] = d_show[['Edital','Real']].astype(str)
+                    
+                    def style_escola(row):
+                        styles = ['text-align: center;'] * 5
+                        val = str(row['Diferenca'])
+                        if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                        elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                        else: styles[3] += 'color: #00c853; font-weight: bold;'
+                        stt = str(row['Status'])
+                        if '🔴' in stt: styles[4] += 'color: #ff4b4b; font-weight: bold;'
+                        elif '🔵' in stt: styles[4] += 'color: #29b6f6; font-weight: bold;'
+                        else: styles[4] += 'color: #00c853; font-weight: bold;'
+                        return styles
+                    st.dataframe(d_show.style.apply(style_escola, axis=1), use_container_width=True, hide_index=True)
+
+                    st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
+                    p_show = df_pessoas[df_pessoas['Escola'] == escola]
+                    if termo_busca: p_show = p_show[p_show['Funcionario'].str.contains(termo_busca, case=False, na=False) | p_show['ID'].astype(str).str.contains(termo_busca, na=False)]
+                    
+                    if not p_show.empty:
+                        event = st.dataframe(p_show[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
+                        if len(event.selection.rows) > 0:
+                            idx_selecionado = event.selection.rows[0]
+                            dados_colaborador = p_show.iloc[idx_selecionado]
+                            editar_colaborador(dados_colaborador, df_unidades_all, df_cargos_all, conn)
+                    else:
+                        st.warning("Nenhum colaborador encontrado.")
+        else:
+            st.warning("Nenhuma escola encontrada com os filtros atuais.")
 
     except Exception as e:
         st.error(f"Erro no sistema: {e}")
