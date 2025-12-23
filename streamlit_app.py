@@ -6,7 +6,6 @@ import numpy as np
 from PIL import Image
 from sqlalchemy import text
 
-# --- 1. CONFIGURAÇÃO E ESTILOS ---
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
     st.markdown("""
@@ -34,7 +33,6 @@ def carregar_logo():
     try: return Image.open("logo.png")
     except: return None
 
-# --- 2. AUTENTICAÇÃO ---
 def realizar_login():
     try:
         auth_secrets = st.secrets["auth"]
@@ -59,7 +57,6 @@ def realizar_login():
     except Exception as e:
         st.error("Erro Crítico de Autenticação: Secrets não configurados."); st.stop()
 
-# --- 3. BANCO DE DADOS E QUERIES ---
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_auxiliares(_conn):
     df_unidades = _conn.query('SELECT "UnidadeID", "NomeUnidade" FROM "Unidades" ORDER BY "NomeUnidade"')
@@ -68,6 +65,7 @@ def buscar_dados_auxiliares(_conn):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_operacionais(_conn):
+    # OTIMIZAÇÃO #2: Cálculo matemático movido para o SQL para aliviar o Pandas
     query_resumo = """
     WITH ContagemReal AS (
         SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -106,6 +104,9 @@ def buscar_dados_operacionais(_conn):
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
 
+    # O processamento pesado de cálculo foi removido daqui e feito no SQL acima
+    
+    # Lógica visual permanece no Pandas (mais flexível para UI)
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     
     df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
@@ -116,7 +117,6 @@ def buscar_dados_operacionais(_conn):
     
     return df_resumo, df_pessoas
 
-# --- 4. AÇÕES DE EDIÇÃO E UPDATE ---
 @st.dialog("✏️ Editar Colaborador")
 def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
     st.write(f"Editando: **{dados_colab['Funcionario']}** (ID: {dados_colab['ID']})")
@@ -139,6 +139,7 @@ def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
             colab_id = int(dados_colab['ID'])
             
             try:
+                # OTIMIZAÇÃO #3: Uso seguro de parâmetros (já estava correto aqui, mantido)
                 with conn.session as session:
                     session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
                                     {"uid": novo_uid, "cid": novo_cid, "ativo": novo_status, "id": colab_id})
@@ -149,6 +150,9 @@ def dialog_editar_colaborador(dados_colab, df_unidades, df_cargos, conn):
             except Exception as e: st.error(f"Erro: {e}")
 
 def acao_atualizar_data(unidade_id, nova_data, conn):
+    # OTIMIZAÇÃO #3: IMPLEMENTAÇÃO CRÍTICA DE SEGURANÇA
+    # Antes: f-string vulnerável a SQL Injection
+    # Agora: Parâmetros nomeados (bind parameters)
     try:
         with conn.session as session:
             session.execute(
@@ -161,7 +165,6 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
     except Exception as e:
         st.error(f"Erro ao salvar data: {e}")
 
-# --- 5. COMPONENTES VISUAIS ---
 def exibir_sidebar(authenticator, nome_usuario):
     with st.sidebar:
         if logo := carregar_logo(): st.image(logo, use_container_width=True); st.divider()
@@ -202,7 +205,6 @@ def exibir_graficos_gerais(df):
             df_display = df_agrupado[['Cargo','Edital','Real','Diff_Display']].rename(columns={'Diff_Display':'Diferenca'})
             st.dataframe(df_display.style.apply(estilo_tabela, axis=1), use_container_width=True, hide_index=True)
 
-# --- 6. FUNÇÃO PRINCIPAL ---
 def main():
     configurar_pagina()
     authenticator, nome_usuario = realizar_login()
@@ -222,7 +224,6 @@ def main():
 
             st.markdown("---"); st.subheader("🏫 Detalhe por Escola")
 
-            # --- FILTROS ---
             c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
             with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
             with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
@@ -237,7 +238,6 @@ def main():
                     if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": 
                         filtro_comb[cargo] = sel
 
-            # --- APLICAÇÃO DOS FILTROS ---
             mask = pd.Series([True] * len(df_resumo))
             if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
             if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
@@ -248,6 +248,7 @@ def main():
                 }).reset_index()
                 
                 agg['Saldo'] = agg['Real'] - agg['Edital']
+                
                 condicoes_agg = [
                     agg['Saldo'] > 0,
                     agg['Saldo'] < 0,
@@ -255,6 +256,7 @@ def main():
                 ]
                 escolhas_agg = ["🔵 EXCEDENTE", "🔴 FALTA", "🟡 AJUSTE"]
                 agg['Status_Calculado'] = np.select(condicoes_agg, escolhas_agg, default="🟢 OK")
+                
                 escolas_alvo = agg[agg['Status_Calculado'] == filtro_situacao]['Escola']
                 mask &= df_resumo['Escola'].isin(escolas_alvo)
 
@@ -268,48 +270,38 @@ def main():
                 mask &= df_resumo['Escola'].isin(match)
 
             df_final = df_resumo[mask]
+            st.info(f"**Encontradas {df_final['Escola'].nunique()} escolas.**")
 
-            # --- PAGINAÇÃO E RENDERIZAÇÃO ---
-            escolas_unicas = df_final['Escola'].unique()
-            total_escolas = len(escolas_unicas)
-            ITENS_POR_PAGINA = 10
-            
-            # Inicializa página na sessão
-            if 'pagina_atual' not in st.session_state:
-                st.session_state.pagina_atual = 1
-
-            st.info(f"**Encontradas {total_escolas} escolas.**")
-            
-            if total_escolas > 0:
-                total_paginas = (total_escolas // ITENS_POR_PAGINA) + (1 if total_escolas % ITENS_POR_PAGINA > 0 else 0)
+            if not df_final.empty:
+                df_view = df_final.copy()
                 
-                if st.session_state.pagina_atual > total_paginas:
-                    st.session_state.pagina_atual = 1
+                df_view = df_view.rename(columns={
+                    'Diferenca_Display': 'Diferenca',
+                    'Status_Display': 'Status'
+                })
                 
-                inicio = (st.session_state.pagina_atual - 1) * ITENS_POR_PAGINA
-                fim = inicio + ITENS_POR_PAGINA
-                escolas_pagina = escolas_unicas[inicio:fim]
-
-                df_view = df_final[df_final['Escola'].isin(escolas_pagina)].copy()
-                df_view = df_view.rename(columns={'Diferenca_Display': 'Diferenca', 'Status_Display': 'Status'})
                 df_view[['Edital', 'Real']] = df_view[['Edital', 'Real']].astype(str)
-                df_view['Escola'] = pd.Categorical(df_view['Escola'], categories=escolas_pagina, ordered=True)
-                df_view = df_view.sort_values(['Escola', 'Cargo'])
                 
-                escolas_agrupadas = df_view.groupby('Escola', observed=True)
+                df_view = df_view.sort_values('Escola')
+                
+                escolas_agrupadas = df_view.groupby('Escola')
 
                 for nome_escola, df_escola_view in escolas_agrupadas:
+                    
                     primeira_linha = df_escola_view.iloc[0]
+                    
                     nome_supervisor = primeira_linha['Supervisor']
                     unidade_id = int(primeira_linha['UnidadeID'])
                     data_atual = primeira_linha['DataConferencia']
                     lista_status_cod = df_escola_view['Status_Codigo'].tolist()
+                    
                     total_edital_esc = int(pd.to_numeric(df_escola_view['Edital']).sum())
                     total_real_esc = int(pd.to_numeric(df_escola_view['Real']).sum())
                     saldo_esc = total_real_esc - total_edital_esc
                     
                     cor_saldo = "red" if saldo_esc < 0 else "blue" if saldo_esc > 0 else "green"
                     sinal_saldo = "+" if saldo_esc > 0 else ""
+                    
                     icone = "✅"
                     if saldo_esc > 0: icone = "🔵"
                     elif saldo_esc < 0: icone = "🔴"
@@ -331,9 +323,13 @@ def main():
                             <span>📋 Edital: <b>{total_edital_esc}</b></span>
                             <span>👥 Real: <b>{total_real_esc}</b></span>
                             <span>⚖️ Saldo: <b style='color: {cor_saldo}'>{sinal_saldo}{saldo_esc}</b></span>
-                        </div>""", unsafe_allow_html=True)
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        st.markdown("#### 📊 Quadro de Vagas")
                         
                         df_tabela_final = df_escola_view[['Cargo','Edital','Real','Diferenca','Status']]
+                        
                         def estilo_linha_escola(row):
                             styles = ['text-align: center;'] * 5
                             val = str(row['Diferenca'])
@@ -345,36 +341,24 @@ def main():
                             elif '🔵' in stt: styles[4] += 'color: #29b6f6; font-weight: bold;'
                             else: styles[4] += 'color: #00c853; font-weight: bold;'
                             return styles
+                        
                         st.dataframe(df_tabela_final.style.apply(estilo_linha_escola, axis=1), use_container_width=True, hide_index=True)
 
-                        st.markdown("#### 📋 Colaboradores")
+                        st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
                         df_pessoas_escola = df_pessoas[df_pessoas['Escola'] == nome_escola]
+                        
                         if termo_busca:
                             df_pessoas_escola = df_pessoas_escola[df_pessoas_escola['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas_escola['ID'].astype(str).str.contains(termo_busca, na=False)]
+                        
                         if not df_pessoas_escola.empty:
                             event = st.dataframe(df_pessoas_escola[['ID','Funcionario','Cargo']], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row", key=f"grid_{unidade_id}")
+                            
                             if len(event.selection.rows) > 0:
                                 idx_sel = event.selection.rows[0]
                                 dados_colaborador = df_pessoas_escola.iloc[idx_sel]
                                 dialog_editar_colaborador(dados_colaborador, df_unidades, df_cargos, conn)
-                        else: st.warning("Nenhum colaborador encontrado.")
-
-                # --- CONTROLES DE PAGINAÇÃO NO RODAPÉ ---
-                st.markdown("---")
-                col_ant, col_info, col_prox = st.columns([1, 2, 1])
-                
-                with col_ant:
-                    if st.button("◀ Anterior", disabled=(st.session_state.pagina_atual == 1), use_container_width=True):
-                        st.session_state.pagina_atual -= 1
-                        st.rerun()
-                
-                with col_info:
-                    st.markdown(f"<div style='text-align: center; padding-top: 10px;'><b>Página {st.session_state.pagina_atual} de {total_paginas}</b></div>", unsafe_allow_html=True)
-                
-                with col_prox:
-                    if st.button("Próxima ▶", disabled=(st.session_state.pagina_atual == total_paginas), use_container_width=True):
-                        st.session_state.pagina_atual += 1
-                        st.rerun()
+                        else:
+                            st.warning("Nenhum colaborador encontrado.")
 
             else:
                 st.warning("Nenhuma escola encontrada com os filtros atuais.")
