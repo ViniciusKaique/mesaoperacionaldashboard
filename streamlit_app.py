@@ -78,14 +78,18 @@ def editar_colaborador(colab_id, nome_atual, escola_atual, cargo_atual, lista_es
                         (SELECT "CargoID" FROM "Cargos" WHERE "NomeCargo" = :nc) as cid
                 """)
                 res = conn.query(query_ids, params={"ue": nova_escola, "nc": novo_cargo})
-                uid, cid = res.iloc[0]['uid'], res.iloc[0]['cid']
                 
-                with conn.session as session:
-                    session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
-                                    {"uid": int(uid), "cid": int(cid), "ativo": novo_status, "id": int(colab_id)})
-                    session.commit()
-                st.cache_data.clear()
-                st.toast("Salvo!", icon="🚀"); st.rerun()
+                # Correção: Verificar se retornou resultado antes de acessar
+                if not res.empty:
+                    uid, cid = res.iloc[0]['uid'], res.iloc[0]['cid']
+                    with conn.session as session:
+                        session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
+                                        {"uid": int(uid), "cid": int(cid), "ativo": novo_status, "id": int(colab_id)})
+                        session.commit()
+                    st.cache_data.clear()
+                    st.toast("Salvo!", icon="🚀"); st.rerun()
+                else:
+                    st.error("Erro ao localizar IDs de Escola ou Cargo.")
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- SISTEMA PRINCIPAL ---
@@ -98,13 +102,13 @@ if st.session_state.get("authentication_status"):
     try:
         conn = st.connection("postgres", type="sql")
 
-        # Dados para Dropdowns (Cacheados)
-        df_meta = conn.query('SELECT "NomeUnidade" FROM "Unidades" ORDER BY 1; SELECT "NomeCargo" FROM "Cargos" ORDER BY 1;', ttl=600)
-        lista_escolas_all = df_meta['NomeUnidade'].tolist()
-        # O Pandas pode misturar os results se não separar, aqui simplificando pegamos do banco direto se precisar ou usamos duas queries
-        # Ajuste rápido para garantir listas limpas:
-        lista_escolas_all = conn.query('SELECT "NomeUnidade" FROM "Unidades" ORDER BY 1', ttl=600)['NomeUnidade'].tolist()
-        lista_cargos_all = conn.query('SELECT "NomeCargo" FROM "Cargos" ORDER BY 1', ttl=600)['NomeCargo'].tolist()
+        # === CORREÇÃO AQUI: Consultas separadas para evitar erro de chave ===
+        df_unidades = conn.query('SELECT "NomeUnidade" FROM "Unidades" ORDER BY 1', ttl=600)
+        lista_escolas_all = df_unidades['NomeUnidade'].tolist()
+        
+        df_cargos = conn.query('SELECT "NomeCargo" FROM "Cargos" ORDER BY 1', ttl=600)
+        lista_cargos_all = df_cargos['NomeCargo'].tolist()
+        # ===================================================================
 
         # === A QUERY SUPREMA (RETORNA JSON) ===
         # Esta query monta tudo que o Streamlit precisa num único objeto por escola
@@ -214,9 +218,6 @@ if st.session_state.get("authentication_status"):
         st.info(f"**{len(filtered_df)} Escolas encontradas.**")
 
         # === RENDERIZAÇÃO OTIMIZADA ===
-        # Iteramos sobre o DataFrame filtrado. Como os detalhes já estão em JSON, 
-        # não precisamos fazer queries extras nem filtrar dataframes grandes dentro do loop.
-        
         for index, row in filtered_df.iterrows():
             escola = row['escola']
             supervisor = row['supervisor']
@@ -256,7 +257,7 @@ if st.session_state.get("authentication_status"):
                                 st.cache_data.clear(); st.rerun()
                         modal_data(unidade_id)
 
-                # HTML KPI (Mais leve que st.metric em loop)
+                # HTML KPI
                 st.markdown(f"""
                 <div class='kpi-box'>
                     <div class='kpi-item'>Edital: <span class='kpi-val'>{t_edital}</span></div>
@@ -265,7 +266,8 @@ if st.session_state.get("authentication_status"):
                 </div>
                 """, unsafe_allow_html=True)
 
-                # Renderiza Tabela de Cargos (HTML Puro para velocidade)
+                # Renderiza Tabela de Cargos (HTML Puro)
+                quadro_data = row['quadro'] if isinstance(row['quadro'], list) else json.loads(row['quadro'])
                 html_quadro = "<table class='simple-table'><thead><tr><th>Cargo</th><th>Edital</th><th>Real</th><th>Dif</th><th>Status</th></tr></thead><tbody>"
                 for item in quadro_data:
                     dif = item['saldo']
@@ -285,11 +287,8 @@ if st.session_state.get("authentication_status"):
                 pessoas_data = row['pessoas'] if isinstance(row['pessoas'], list) else json.loads(row['pessoas'])
                 
                 if pessoas_data:
-                    # Usamos st.dataframe aqui apenas para permitir seleção, pois é interativo
                     df_p = pd.DataFrame(pessoas_data)
-                    # Renomeia colunas para display bonito
                     df_p = df_p.rename(columns={'nome': 'Nome', 'cargo': 'Cargo', 'id': 'ID'})
-                    
                     event = st.dataframe(df_p[['ID', 'Nome', 'Cargo']], hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun", key=f"grid_{unidade_id}")
                     
                     if len(event.selection.rows) > 0:
