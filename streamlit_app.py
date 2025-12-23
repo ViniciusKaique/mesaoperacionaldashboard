@@ -15,7 +15,6 @@ def realizar_login():
         s = st.secrets["auth"]
         creds = {'usernames': {s["username"]: {'name': s["name"], 'password': s["password_hash"], 'email': s["email"]}}}
         auth = stauth.Authenticate(creds, s["cookie_name"], s["cookie_key"], s["cookie_expiry_days"])
-        
         if not st.session_state.get("authentication_status"):
             st.write("\n" * 5)
             c1, c2, c3 = st.columns([3, 2, 3])
@@ -142,8 +141,9 @@ def main():
                     st.markdown(f"<div style='background:#262730;padding:8px;border-radius:5px;border:1px solid #404040;display:flex;justify-content:space-around'><span>📋 {tot_e}</span><span>👥 {tot_r}</span><span style='color:{cor}'><b>{'+' if saldo>0 else ''}{saldo}</b></span></div>", unsafe_allow_html=True)
 
                     def style_row(r):
-                        c = '#ff4b4b' if '-' in str(r['Diferenca']) else '#29b6f6' if '+' in str(r['Diferenca']) else '#00c853'
-                        return [f'text-align:center; color:{c if i==3 or (i==4 and c in str(r["Status_Display"])) else "inherit"}; font-weight:{"bold" if i in [3,4] else "normal"}' for i in range(5)]
+                        val = str(r['Diferenca'])
+                        c = '#ff4b4b' if '-' in val else '#29b6f6' if '+' in val else '#00c853'
+                        return [f'text-align:center; color:{c if i in [3,4] else "inherit"}; font-weight:{"bold" if i in [3,4] else "normal"}' for i in range(5)]
                     
                     st.dataframe(dfe[['Cargo','Edital','Real','Diferenca_Display','Status_Display']].rename(columns={'Diferenca_Display':'Diferenca','Status_Display':'Status'}).style.apply(style_row, axis=1), use_container_width=True, hide_index=True)
                     
