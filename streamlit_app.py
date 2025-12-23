@@ -101,12 +101,13 @@ if st.session_state.get("authentication_status"):
     try:
         conn = st.connection("postgres", type="sql")
 
-        # Dados Auxiliares
+        # === CORREÇÃO 1: Consultas separadas para evitar erro 'NomeUnidade' ===
         df_unidades = conn.query('SELECT "NomeUnidade" FROM "Unidades" ORDER BY 1', ttl=600)
         lista_escolas_all = df_unidades['NomeUnidade'].tolist()
         
         df_cargos = conn.query('SELECT "NomeCargo" FROM "Cargos" ORDER BY 1', ttl=600)
         lista_cargos_all = df_cargos['NomeCargo'].tolist()
+        # ======================================================================
 
         # === A QUERY (JSON) ===
         query_json = """
@@ -163,19 +164,6 @@ if st.session_state.get("authentication_status"):
         df_main = conn.query(query_json, ttl=300) 
         df_main['DataConferencia'] = pd.to_datetime(df_main['DataConferencia'])
 
-        # === PROCESSAMENTO PARA GRÁFICO (RESTAURADO) ===
-        # Extraímos todos os cargos de dentro dos JSONs para montar o gráfico geral
-        all_cargos_data = []
-        for q in df_main['quadro']:
-            items = q if isinstance(q, list) else json.loads(q)
-            all_cargos_data.extend(items)
-        
-        df_grafico = pd.DataFrame(all_cargos_data)
-        if not df_grafico.empty:
-            df_grafico_agrupado = df_grafico.groupby('cargo')[['edital', 'real']].sum().reset_index()
-            df_grafico_agrupado['Diferenca'] = df_grafico_agrupado['real'] - df_grafico_agrupado['edital']
-            df_grafico_agrupado['Diferenca_display'] = df_grafico_agrupado['Diferenca'].apply(lambda x: f"+{x}" if x > 0 else str(x))
-
         # === KPI SUPERIOR ===
         st.title("📊 Mesa Operacional")
         total_edital_geral = df_main['t_edital'].sum()
@@ -189,9 +177,19 @@ if st.session_state.get("authentication_status"):
         
         st.markdown("---")
 
-        # === ÁREA DE GRÁFICOS (RESTAURADA) ===
+        # === GRÁFICOS (CORRIGIDO ERRO 'Diferenca_display') ===
         with st.expander("📈 Ver Gráficos e Resumo Geral", expanded=True):
+            all_cargos_data = []
+            for q in df_main['quadro']:
+                items = q if isinstance(q, list) else json.loads(q)
+                all_cargos_data.extend(items)
+            
+            df_grafico = pd.DataFrame(all_cargos_data)
             if not df_grafico.empty:
+                df_grafico_agrupado = df_grafico.groupby('cargo')[['edital', 'real']].sum().reset_index()
+                df_grafico_agrupado['Diferenca'] = df_grafico_agrupado['real'] - df_grafico_agrupado['edital']
+                df_grafico_agrupado['Diferenca_display'] = df_grafico_agrupado['Diferenca'].apply(lambda x: f"+{x}" if x > 0 else str(x))
+
                 col_g1, col_g2 = st.columns([2,1])
                 with col_g1:
                     fig = px.bar(df_grafico_agrupado.melt(id_vars=['cargo'], value_vars=['edital','real'], var_name='Tipo', value_name='Quantidade'), 
@@ -201,15 +199,21 @@ if st.session_state.get("authentication_status"):
                     st.plotly_chart(fig, use_container_width=True)
                 
                 with col_g2:
+                    # Renomeamos para 'Diferenca' no display
+                    df_show = df_grafico_agrupado[['cargo','edital','real','Diferenca_display']].rename(
+                        columns={'cargo':'Cargo', 'edital':'Edital', 'real':'Real', 'Diferenca_display':'Diferenca'}
+                    )
+                    
                     def style_table(row):
                         styles = ['text-align: center;'] * 4
-                        val = str(row['Diferenca_display'])
+                        # === CORREÇÃO 2: Usar o nome NOVO da coluna ('Diferenca') e não o antigo ===
+                        val = str(row['Diferenca']) 
+                        # =========================================================================
                         if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
                         elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
                         else: styles[3] += 'color: #00c853; font-weight: bold;'
                         return styles
                     
-                    df_show = df_grafico_agrupado[['cargo','edital','real','Diferenca_display']].rename(columns={'cargo':'Cargo', 'edital':'Edital', 'real':'Real', 'Diferenca_display':'Diferenca'})
                     st.dataframe(df_show.style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
             else:
                 st.warning("Sem dados para gráficos.")
@@ -227,7 +231,6 @@ if st.session_state.get("authentication_status"):
         if f_escola != "Todas": filtered_df = filtered_df[filtered_df['escola'] == f_escola]
         if f_super != "Todos": filtered_df = filtered_df[filtered_df['supervisor'] == f_super]
         
-        # Função para calcular status da linha
         def get_status(row):
             saldo = row['t_real'] - row['t_edital']
             if saldo > 0: return "🔵 EXCEDENTE"
