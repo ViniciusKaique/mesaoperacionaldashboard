@@ -1,6 +1,7 @@
 import streamlit as st 
 import streamlit_authenticator as stauth
 import pandas as pd
+import plotly.express as px
 import json
 from PIL import Image
 from sqlalchemy import text
@@ -24,7 +25,7 @@ st.markdown("""
     .kpi-item { font-size: 16px; color: white; }
     .kpi-val { font-weight: bold; font-size: 18px; }
     
-    /* Tabelas HTML puras (Mais rápido que st.dataframe para visualização simples) */
+    /* Tabelas HTML puras */
     .simple-table { width: 100%; border-collapse: collapse; font-size: 14px; margin-bottom: 10px; }
     .simple-table th { background-color: #333; color: white; padding: 6px; text-align: center; }
     .simple-table td { padding: 6px; text-align: center; border-bottom: 1px solid #444; color: #ddd; }
@@ -71,7 +72,6 @@ def editar_colaborador(colab_id, nome_atual, escola_atual, cargo_atual, lista_es
         
         if st.form_submit_button("💾 Salvar"):
             try:
-                # Busca IDs (Poderia vir direto no JSON, mas aqui simplifica a query principal)
                 query_ids = text("""
                     SELECT 
                         (SELECT "UnidadeID" FROM "Unidades" WHERE "NomeUnidade" = :ue) as uid,
@@ -79,7 +79,6 @@ def editar_colaborador(colab_id, nome_atual, escola_atual, cargo_atual, lista_es
                 """)
                 res = conn.query(query_ids, params={"ue": nova_escola, "nc": novo_cargo})
                 
-                # Correção: Verificar se retornou resultado antes de acessar
                 if not res.empty:
                     uid, cid = res.iloc[0]['uid'], res.iloc[0]['cid']
                     with conn.session as session:
@@ -89,7 +88,7 @@ def editar_colaborador(colab_id, nome_atual, escola_atual, cargo_atual, lista_es
                     st.cache_data.clear()
                     st.toast("Salvo!", icon="🚀"); st.rerun()
                 else:
-                    st.error("Erro ao localizar IDs de Escola ou Cargo.")
+                    st.error("Erro ao localizar IDs.")
             except Exception as e: st.error(f"Erro: {e}")
 
 # --- SISTEMA PRINCIPAL ---
@@ -97,21 +96,19 @@ if st.session_state.get("authentication_status"):
     name = st.session_state.get("name")
     with st.sidebar:
         if logo := carregar_logo(): st.image(logo, use_container_width=True); st.divider()
-        st.write(f"👤 **{name}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Modo Turbo (JSON SQL)")
+        st.write(f"👤 **{name}**"); authenticator.logout(location='sidebar'); st.divider(); st.info("Modo Turbo (Visual + JSON)")
 
     try:
         conn = st.connection("postgres", type="sql")
 
-        # === CORREÇÃO AQUI: Consultas separadas para evitar erro de chave ===
+        # Dados Auxiliares
         df_unidades = conn.query('SELECT "NomeUnidade" FROM "Unidades" ORDER BY 1', ttl=600)
         lista_escolas_all = df_unidades['NomeUnidade'].tolist()
         
         df_cargos = conn.query('SELECT "NomeCargo" FROM "Cargos" ORDER BY 1', ttl=600)
         lista_cargos_all = df_cargos['NomeCargo'].tolist()
-        # ===================================================================
 
-        # === A QUERY SUPREMA (RETORNA JSON) ===
-        # Esta query monta tudo que o Streamlit precisa num único objeto por escola
+        # === A QUERY (JSON) ===
         query_json = """
         WITH DadosReais AS (
             SELECT "UnidadeID", "CargoID", COUNT(*) as qtd 
@@ -163,18 +160,28 @@ if st.session_state.get("authentication_status"):
         ORDER BY u."NomeUnidade";
         """
 
-        # Carrega dados já estruturados (MUITO RÁPIDO)
         df_main = conn.query(query_json, ttl=300) 
-        
-        # Converte DataConferencia para datetime
         df_main['DataConferencia'] = pd.to_datetime(df_main['DataConferencia'])
 
+        # === PROCESSAMENTO PARA GRÁFICO (RESTAURADO) ===
+        # Extraímos todos os cargos de dentro dos JSONs para montar o gráfico geral
+        all_cargos_data = []
+        for q in df_main['quadro']:
+            items = q if isinstance(q, list) else json.loads(q)
+            all_cargos_data.extend(items)
+        
+        df_grafico = pd.DataFrame(all_cargos_data)
+        if not df_grafico.empty:
+            df_grafico_agrupado = df_grafico.groupby('cargo')[['edital', 'real']].sum().reset_index()
+            df_grafico_agrupado['Diferenca'] = df_grafico_agrupado['real'] - df_grafico_agrupado['edital']
+            df_grafico_agrupado['Diferenca_display'] = df_grafico_agrupado['Diferenca'].apply(lambda x: f"+{x}" if x > 0 else str(x))
+
         # === KPI SUPERIOR ===
+        st.title("📊 Mesa Operacional")
         total_edital_geral = df_main['t_edital'].sum()
         total_real_geral = df_main['t_real'].sum()
         saldo_geral = total_real_geral - total_edital_geral
         
-        st.title("📊 Mesa Operacional (Modo Turbo JSON)")
         c1, c2, c3 = st.columns(3)
         with c1: st.metric("📋 Total Edital", int(total_edital_geral))
         with c2: st.metric("👥 Efetivo Atual", int(total_real_geral))
@@ -182,26 +189,50 @@ if st.session_state.get("authentication_status"):
         
         st.markdown("---")
 
-        # === FILTROS (PYTHON - RÁPIDO POIS SÃO POUCAS LINHAS DE ESCOLAS) ===
+        # === ÁREA DE GRÁFICOS (RESTAURADA) ===
+        with st.expander("📈 Ver Gráficos e Resumo Geral", expanded=True):
+            if not df_grafico.empty:
+                col_g1, col_g2 = st.columns([2,1])
+                with col_g1:
+                    fig = px.bar(df_grafico_agrupado.melt(id_vars=['cargo'], value_vars=['edital','real'], var_name='Tipo', value_name='Quantidade'), 
+                                 x='cargo', y='Quantidade', color='Tipo', barmode='group', 
+                                 color_discrete_map={'edital': '#808080','real': '#00bfff'}, 
+                                 text_auto=True, template="seaborn")
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col_g2:
+                    def style_table(row):
+                        styles = ['text-align: center;'] * 4
+                        val = str(row['Diferenca_display'])
+                        if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
+                        elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
+                        else: styles[3] += 'color: #00c853; font-weight: bold;'
+                        return styles
+                    
+                    df_show = df_grafico_agrupado[['cargo','edital','real','Diferenca_display']].rename(columns={'cargo':'Cargo', 'edital':'Edital', 'real':'Real', 'Diferenca_display':'Diferenca'})
+                    st.dataframe(df_show.style.apply(style_table, axis=1), use_container_width=True, hide_index=True)
+            else:
+                st.warning("Sem dados para gráficos.")
+
+        st.markdown("---"); st.subheader("🏫 Detalhe por Escola")
+
+        # === FILTROS ===
         c_f1, c_f2, c_f3, c_f4 = st.columns([1, 1, 1, 1])
         with c_f1: f_escola = st.selectbox("Escola:", ["Todas"] + df_main['escola'].tolist())
         with c_f2: f_super = st.selectbox("Supervisor:", ["Todos"] + sorted(df_main['supervisor'].unique().tolist()))
         with c_f3: f_status = st.selectbox("Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
         with c_f4: f_busca = st.text_input("Buscar Pessoa:", "")
 
-        # Lógica de Filtragem
         filtered_df = df_main.copy()
-        
         if f_escola != "Todas": filtered_df = filtered_df[filtered_df['escola'] == f_escola]
         if f_super != "Todos": filtered_df = filtered_df[filtered_df['supervisor'] == f_super]
         
-        # Função para calcular status da linha (Rápida)
+        # Função para calcular status da linha
         def get_status(row):
             saldo = row['t_real'] - row['t_edital']
             if saldo > 0: return "🔵 EXCEDENTE"
             if saldo < 0: return "🔴 FALTA"
-            # Verifica JSON interno para ajuste
-            quadro = row['quadro'] # Já é uma lista de dicts ou json string
+            quadro = row['quadro'] 
             if isinstance(quadro, str): quadro = json.loads(quadro)
             for item in quadro:
                 if item['saldo'] != 0: return "🟡 AJUSTE"
@@ -212,12 +243,11 @@ if st.session_state.get("authentication_status"):
             filtered_df = filtered_df[filtered_df['status_calc'] == f_status]
         
         if f_busca:
-            # Busca dentro do JSON de pessoas (Search Text)
             filtered_df = filtered_df[filtered_df['pessoas'].astype(str).str.contains(f_busca, case=False)]
 
         st.info(f"**{len(filtered_df)} Escolas encontradas.**")
 
-        # === RENDERIZAÇÃO OTIMIZADA ===
+        # === RENDERIZAÇÃO ===
         for index, row in filtered_df.iterrows():
             escola = row['escola']
             supervisor = row['supervisor']
@@ -227,26 +257,20 @@ if st.session_state.get("authentication_status"):
             saldo = t_real - t_edital
             unidade_id = row['UnidadeID']
             
-            # Status e Ícone
             icon = "✅"
-            cor_saldo = "#00c853" # Green
-            if saldo > 0: 
-                icon = "🔵"; cor_saldo = "#29b6f6"
-            elif saldo < 0: 
-                icon = "🔴"; cor_saldo = "#ff4b4b"
+            cor_saldo = "#00c853"
+            if saldo > 0: icon = "🔵"; cor_saldo = "#29b6f6"
+            elif saldo < 0: icon = "🔴"; cor_saldo = "#ff4b4b"
             else:
-                # Checa ajuste fino
                 quadro_data = row['quadro'] if isinstance(row['quadro'], list) else json.loads(row['quadro'])
                 if any(q['saldo'] != 0 for q in quadro_data): icon = "🟡"
 
             with st.expander(f"{icon} {escola}", expanded=False):
-                # Header Interno
                 c_sup, c_data = st.columns([3, 1])
                 with c_sup: st.markdown(f"**Supervisor:** {supervisor}")
                 with c_data:
                     lbl = "⚠️ Pendente" if pd.isnull(data_conf) else data_conf.strftime('%d/%m/%Y')
                     if st.button(f"📅 {lbl}", key=f"btn_d_{unidade_id}"):
-                        # Dialog simples para data
                         @st.dialog("Data")
                         def modal_data(uid):
                             d = st.date_input("Nova data")
@@ -257,7 +281,6 @@ if st.session_state.get("authentication_status"):
                                 st.cache_data.clear(); st.rerun()
                         modal_data(unidade_id)
 
-                # HTML KPI
                 st.markdown(f"""
                 <div class='kpi-box'>
                     <div class='kpi-item'>Edital: <span class='kpi-val'>{t_edital}</span></div>
@@ -266,7 +289,6 @@ if st.session_state.get("authentication_status"):
                 </div>
                 """, unsafe_allow_html=True)
 
-                # Renderiza Tabela de Cargos (HTML Puro)
                 quadro_data = row['quadro'] if isinstance(row['quadro'], list) else json.loads(row['quadro'])
                 html_quadro = "<table class='simple-table'><thead><tr><th>Cargo</th><th>Edital</th><th>Real</th><th>Dif</th><th>Status</th></tr></thead><tbody>"
                 for item in quadro_data:
@@ -282,7 +304,6 @@ if st.session_state.get("authentication_status"):
                 html_quadro += "</tbody></table>"
                 st.markdown(html_quadro, unsafe_allow_html=True)
                 
-                # Renderiza Pessoas
                 st.markdown("**👥 Colaboradores**")
                 pessoas_data = row['pessoas'] if isinstance(row['pessoas'], list) else json.loads(row['pessoas'])
                 
@@ -290,7 +311,6 @@ if st.session_state.get("authentication_status"):
                     df_p = pd.DataFrame(pessoas_data)
                     df_p = df_p.rename(columns={'nome': 'Nome', 'cargo': 'Cargo', 'id': 'ID'})
                     event = st.dataframe(df_p[['ID', 'Nome', 'Cargo']], hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun", key=f"grid_{unidade_id}")
-                    
                     if len(event.selection.rows) > 0:
                         sel_idx = event.selection.rows[0]
                         p_sel = df_p.iloc[sel_idx]
