@@ -40,22 +40,35 @@ def realizar_login():
             'credentials': {'usernames': {auth_secrets["username"]: {'name': auth_secrets["name"], 'password': auth_secrets["password_hash"], 'email': auth_secrets["email"]}}},
             'cookie': {'name': auth_secrets["cookie_name"], 'key': auth_secrets["cookie_key"], 'expiry_days': auth_secrets["cookie_expiry_days"]}
         }
-        authenticator = stauth.Authenticate(config['credentials'], config['cookie']['name'], config['cookie']['key'], config['cookie']['expiry_days'])
+        # Cria a instância do autenticador
+        authenticator = stauth.Authenticate(
+            config['credentials'], 
+            config['cookie']['name'], 
+            config['cookie']['key'], 
+            config['cookie']['expiry_days']
+        )
         
+        # Verifica o status antes de tentar renderizar o login
         if not st.session_state.get("authentication_status"):
             st.write(""); st.write(""); st.write(""); st.write(""); st.write("")
             col_esq, col_centro, col_dir = st.columns([3, 2, 3])
+            
             with col_centro:
-                try: authenticator.login(location='main')
-                except: authenticator.login()
+                # CORREÇÃO AQUI: Removemos o try/except e o argumento location='main'
+                # A maioria das versões atuais usa 'main' por padrão se não especificar
+                authenticator.login()
+                
             if st.session_state.get("authentication_status") is False:
                 with col_centro: st.error('Usuário ou senha incorretos')
+            
+            # Se não estiver logado, retorna None para parar o fluxo
             return None, None
             
         return authenticator, st.session_state.get("name")
         
     except Exception as e:
-        st.error("Erro Crítico de Autenticação: Secrets não configurados."); st.stop()
+        st.error(f"Erro Crítico de Autenticação: {e}") # Melhorado para mostrar o erro real se houver
+        st.stop()
 
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_auxiliares(_conn):
