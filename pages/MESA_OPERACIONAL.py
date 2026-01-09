@@ -250,6 +250,8 @@ def dialog_disparar_alertas(df_completo):
             
             msg_lines = [f"Ola *{supervisor}*, resumo de ausencias ({datetime.now().strftime('%H:%M')}):"]
             
+            msg_lines.append("") # <--- LINHA EM BRANCO ADICIONADA AQUI
+            
             # Adiciona Totalizadores no Cabeçalho
             msg_lines.append(f"\U0001F4CA *Total Faltas:* {total_faltas}")
             if total_escolas_problema > 0:
