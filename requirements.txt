@@ -1,0 +1,9 @@
+streamlit
+streamlit-authenticator>=0.3.3
+extra-streamlit-components>=0.1.71
+pandas
+plotly
+Pillow
+SQLAlchemy
+psycopg2-binary
+streamlit-lottie
