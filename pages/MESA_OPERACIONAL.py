@@ -180,7 +180,7 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE WHATSAPP (COM ORDENAÇÃO E TOTALIZADORES)
+# 6. FUNCIONALIDADE WHATSAPP (CORRIGIDA E MELHORADA)
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
     # Garante que a mensagem esteja em utf-8 antes de codificar para URL
@@ -190,9 +190,9 @@ def gerar_link_whatsapp(telefone, mensagem):
 
 @st.dialog("📢 Central de Alertas", width="large")
 def dialog_disparar_alertas(df_completo):
-    st.caption("Envie mensagens para os supervisores. Prioriza escolas com possível problema de aparelho.")
+    st.caption("Envie mensagens para os supervisores. Prioriza escolas com problema de registro.")
     
-    # 1. Filtra apenas as linhas com FALTA
+    # 1. Identificar quem tem faltas
     df_faltas_bruto = df_completo[df_completo['Status_Individual'] == '🔴 Falta']
     
     if df_faltas_bruto.empty:
@@ -205,12 +205,12 @@ def dialog_disparar_alertas(df_completo):
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             
-            # Dados deste supervisor
+            # Filtra dados DESTE supervisor (Faltas e Completo para análise)
             df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
             df_sup_total = df_completo[df_completo['Supervisor'] == supervisor]
             
             # --- PREPARAÇÃO DOS DADOS (PARA ORDENAÇÃO) ---
-            escolas_para_mensagem = []
+            escolas_list = []
             
             # Itera sobre cada escola que tem falta para classificar
             for escola, dados_falta in df_sup_faltas.groupby('Escola'):
@@ -225,38 +225,39 @@ def dialog_disparar_alertas(df_completo):
                 # Lista de nomes faltantes
                 lista_nomes = dados_falta['Funcionario'].tolist()
                 
-                escolas_para_mensagem.append({
-                    'escola': escola,
-                    'is_problem': eh_problema_app,
-                    'nomes': lista_nomes,
-                    'qtd_faltas': len(lista_nomes)
+                escolas_list.append({
+                    'nome': escola,
+                    'funcionarios': lista_nomes,
+                    'problema_app': eh_problema_app,
+                    'qtd': len(lista_nomes)
                 })
             
             # --- ORDENAÇÃO ---
             # Escolas com problema (True) aparecem primeiro
-            escolas_para_mensagem.sort(key=lambda x: x['is_problem'], reverse=True)
+            escolas_list.sort(key=lambda x: x['problema_app'], reverse=True)
             
             # --- CÁLCULO DOS TOTALIZADORES ---
-            total_faltas = sum(e['qtd_faltas'] for e in escolas_para_mensagem)
-            total_escolas_problema = sum(1 for e in escolas_para_mensagem if e['is_problem'])
+            total_faltas = sum(e['qtd'] for e in escolas_list)
+            total_escolas_problema = sum(1 for e in escolas_list if e['problema_app'])
             
             # --- MONTAGEM DA MENSAGEM ---
-            msg_lines = [f"Olá *{supervisor}*, resumo de ausências ({datetime.now().strftime('%H:%M')}):"]
+            msg_lines = [f"Ola *{supervisor}*, resumo de ausencias ({datetime.now().strftime('%H:%M')}):"]
             
             # Adiciona Totalizadores no Cabeçalho
-            msg_lines.append(f"📊 *Total Faltas:* {total_faltas}")
+            msg_lines.append(f"Total Faltas: {total_faltas}")
             if total_escolas_problema > 0:
-                msg_lines.append(f"⚠️ *Escolas c/ Problema App:* {total_escolas_problema}")
+                msg_lines.append(f"Escolas c/ Problema App: {total_escolas_problema}")
             
             msg_lines.append("") # Linha em branco
             
-            for item in escolas_para_mensagem:
-                nomes_str = ", ".join(item['nomes'])
+            for item in escolas_list:
+                nomes_str = ", ".join(item['funcionarios'])
                 
-                if item['is_problem']:
-                    cabecalho = f"🚨 *{item['escola']}* (⚠️ POSSÍVEL PROBLEMA SMARTPHONE)"
+                if item['problema_app']:
+                    # Emoji direto e texto de alerta
+                    cabecalho = f"🚨 *{item['nome']}* (POSSIVEL PROBLEMA SMARTPHONE)"
                 else:
-                    cabecalho = f"🏫 *{item['escola']}*"
+                    cabecalho = f"🏫 *{item['nome']}*"
                 
                 msg_lines.append(f"{cabecalho}\n🚫 {nomes_str}\n")
             
