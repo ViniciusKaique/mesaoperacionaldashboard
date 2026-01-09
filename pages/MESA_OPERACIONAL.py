@@ -180,19 +180,20 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE WHATSAPP (CORRIGIDA E MELHORADA)
+# 6. FUNCIONALIDADE WHATSAPP (UNICODE + LINK SEGURO)
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
-    # Garante que a mensagem esteja em utf-8 antes de codificar para URL
-    texto_encoded = urllib.parse.quote(mensagem)
+    # 'quote_plus' é mais seguro para espaços e caracteres especiais em URLs do que 'quote'
+    texto_encoded = urllib.parse.quote_plus(mensagem)
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
-    return f"https://wa.me/55{fone_limpo}?text={texto_encoded}"
+    # Usando api.whatsapp.com que lida melhor com redirects e encoding
+    return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
 
 @st.dialog("📢 Central de Alertas", width="large")
 def dialog_disparar_alertas(df_completo):
     st.caption("Envie mensagens para os supervisores. Prioriza escolas com problema de registro.")
     
-    # 1. Identificar quem tem faltas
+    # 1. Filtra apenas as linhas com FALTA
     df_faltas_bruto = df_completo[df_completo['Status_Individual'] == '🔴 Falta']
     
     if df_faltas_bruto.empty:
@@ -205,7 +206,7 @@ def dialog_disparar_alertas(df_completo):
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             
-            # Filtra dados DESTE supervisor (Faltas e Completo para análise)
+            # Dados deste supervisor
             df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
             df_sup_total = df_completo[df_completo['Supervisor'] == supervisor]
             
@@ -240,13 +241,19 @@ def dialog_disparar_alertas(df_completo):
             total_faltas = sum(e['qtd'] for e in escolas_list)
             total_escolas_problema = sum(1 for e in escolas_list if e['problema_app'])
             
-            # --- MONTAGEM DA MENSAGEM ---
+            # --- MONTAGEM DA MENSAGEM (USANDO UNICODE) ---
+            # \U0001F4CA = 📊
+            # \u26A0\uFE0F = ⚠️
+            # \U0001F6A8 = 🚨
+            # \U0001F3EB = 🏫
+            # \U0001F6AB = 🚫
+            
             msg_lines = [f"Ola *{supervisor}*, resumo de ausencias ({datetime.now().strftime('%H:%M')}):"]
             
             # Adiciona Totalizadores no Cabeçalho
-            msg_lines.append(f"Total Faltas: {total_faltas}")
+            msg_lines.append(f"\U0001F4CA *Total Faltas:* {total_faltas}")
             if total_escolas_problema > 0:
-                msg_lines.append(f"Escolas c/ Problema App: {total_escolas_problema}")
+                msg_lines.append(f"\u26A0\uFE0F *Escolas c/ Problema App:* {total_escolas_problema}")
             
             msg_lines.append("") # Linha em branco
             
@@ -254,12 +261,13 @@ def dialog_disparar_alertas(df_completo):
                 nomes_str = ", ".join(item['funcionarios'])
                 
                 if item['problema_app']:
-                    # Emoji direto e texto de alerta
-                    cabecalho = f"🚨 *{item['nome']}* (POSSIVEL PROBLEMA SMARTPHONE)"
+                    cabecalho = f"\U0001F6A8 *{item['nome']}* (\u26A0\uFE0F POSSIVEL PROBLEMA SMARTPHONE)"
                 else:
-                    cabecalho = f"🏫 *{item['nome']}*"
+                    cabecalho = f"\U0001F3EB *{item['nome']}*"
                 
-                msg_lines.append(f"{cabecalho}\n🚫 {nomes_str}\n")
+                msg_lines.append(f"{cabecalho}")
+                msg_lines.append(f"\U0001F6AB {nomes_str}")
+                msg_lines.append("") # Espaço
             
             msg_final = "\n".join(msg_lines).strip()
             
@@ -278,7 +286,7 @@ def dialog_disparar_alertas(df_completo):
                 kpi2.metric("Escolas Críticas", total_escolas_problema)
                 
                 with st.expander("Ver mensagem gerada"):
-                    st.code(msg_final, language=None)
+                    st.text(msg_final)
             
             with c2:
                 if telefone_bruto:
