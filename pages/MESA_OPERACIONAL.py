@@ -41,7 +41,7 @@ except Exception as e:
 def fetch_supervisores_db():
     try:
         conn = st.connection("postgres", type="sql")
-        # ATUALIZADO: Buscando o campo "Celular"
+        # CORREÇÃO: Uso de aspas em "Celular" para garantir que o Postgres ache a coluna
         query = """
         SELECT 
             u."UnidadeID", 
@@ -55,7 +55,7 @@ def fetch_supervisores_db():
         return df
     except Exception as e:
         st.error(f"Erro DB: {e}")
-        # Colunas de fallback caso dê erro
+        # Retorna dataframe vazio com as colunas esperadas para não quebrar o código
         return pd.DataFrame(columns=["UnidadeID", "Supervisor", "Celular"])
 
 # ==============================================================================
@@ -108,7 +108,7 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
 
     # 2. Merge com DB (UnidadeID = NRESTRUTGEREN)
     df_api['UnidadeID'] = pd.to_numeric(df_api['NRESTRUTGEREN'], errors='coerce').fillna(0).astype(int)
-    # O merge trará a coluna 'Celular' do df_supervisores
+    # O merge trará a coluna 'Celular'
     df_merged = pd.merge(df_api, df_supervisores, on="UnidadeID", how="left")
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
 
@@ -196,11 +196,12 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE DE DISPARO WHATSAPP (NOVO)
+# 6. FUNCIONALIDADE DE DISPARO WHATSAPP
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
     texto_encoded = urllib.parse.quote(mensagem)
     # Remove formatação do telefone para o link (deixa apenas números)
+    # Ex: (11) 99999-9999 vira 11999999999
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
     return f"https://wa.me/55{fone_limpo}?text={texto_encoded}"
 
@@ -227,10 +228,12 @@ def dialog_disparar_alertas(df_completo):
             qtd_faltas = len(df_sup)
             
             # --- PEGA O TELEFONE DO BANCO ---
-            # Verifica se a coluna Celular existe e pega o primeiro valor
+            # Pega o primeiro valor encontrado para o supervisor
             telefone_bruto = None
             if 'Celular' in df_sup.columns:
-                telefone_bruto = df_sup['Celular'].iloc[0]
+                val = df_sup['Celular'].iloc[0]
+                if pd.notna(val) and str(val).strip() != "":
+                    telefone_bruto = val
             
             # Monta a mensagem
             msg_lines = [f"Olá *{supervisor}*, segue o relatório de ausências ({datetime.now().strftime('%H:%M')}):"]
@@ -249,13 +252,14 @@ def dialog_disparar_alertas(df_completo):
             
             # Coluna da Direita: Botão de Ação
             with c2:
-                # Verifica se o telefone existe e não é nulo/vazio
-                if pd.notna(telefone_bruto) and str(telefone_bruto).strip() != "":
+                # Verifica se o telefone existe
+                if telefone_bruto:
                     link = gerar_link_whatsapp(telefone_bruto, msg_final)
-                    st.link_button("📲 Enviar WhatsApp", link, use_container_width=True, type="primary")
+                    # CORREÇÃO: Botão neutro (sem type="primary")
+                    st.link_button("📲 Enviar WhatsApp", link, use_container_width=True)
                 else:
-                    st.error("Sem Telefone")
-                    st.caption("Cadastre a coluna 'Celular' no Banco")
+                    st.warning("Sem Celular")
+                    st.caption("Cadastre no Banco")
 
 # ==============================================================================
 # 7. UI - SIDEBAR
@@ -279,20 +283,20 @@ data_selecionada = st.sidebar.date_input("Data de Análise", datetime.now())
 if st.session_state['mesa_data_ref'] != data_selecionada:
     st.session_state['mesa_dados'] = None 
 
+# --- BOTÃO DE ATUALIZAR ---
 if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
     st.session_state['mesa_dados'] = None
     st.cache_data.clear()
     st.rerun()
 
 # ==============================================================================
-# 8. CARREGAMENTO
+# 8. CARREGAMENTO DOS DADOS (ANTES DA INTERFACE PRINCIPAL)
 # ==============================================================================
 if st.session_state['mesa_dados'] is None:
     with st.spinner(f"Buscando dados de {data_selecionada.strftime('%d/%m/%Y')}..."):
         df_sup = fetch_supervisores_db()
         raw_api = fetch_mesa_operacional(data_selecionada)
         df_proc = processar_dados_unificados(raw_api, df_sup, data_selecionada)
-        
         st.session_state['mesa_dados'] = df_proc
         st.session_state['mesa_data_ref'] = data_selecionada
 
@@ -300,20 +304,23 @@ df = st.session_state['mesa_dados']
 data_exibicao = st.session_state['mesa_data_ref'].strftime("%d/%m/%Y")
 
 # ==============================================================================
-# 9. DASHBOARD
+# 9. DASHBOARD PRINCIPAL
 # ==============================================================================
 st.title("📉 Monitoramento de Faltas")
 st.caption(f"Dados referentes a: **{data_exibicao}**")
 
-# --- NOVO BLOCO: BOTÃO DE DISPARO ---
-col_head1, col_head2 = st.columns([3, 1])
-with col_head2:
-    if st.button("📢 Disparar Alertas", use_container_width=True, type="primary"):
-        if df is not None and not df.empty:
+# --- BOTÃO DE DISPARO EM DESTAQUE ---
+if df is not None and not df.empty:
+    st.markdown("---")
+    c_btn1, c_btn2 = st.columns([3, 1])
+    with c_btn1:
+        st.info("💡 Clique ao lado para notificar os supervisores sobre as faltas identificadas.")
+    with c_btn2:
+        # CORREÇÃO: Botão neutro (sem type="primary")
+        if st.button("📢 Disparar Alertas", use_container_width=True):
             dialog_disparar_alertas(df)
-        else:
-            st.warning("Sem dados para processar.")
-# ------------------------------------
+    st.markdown("---")
+# -----------------------------------------------------
 
 # Filtro Supervisor
 filtro_supervisor = "Todos"
@@ -330,18 +337,16 @@ if df is not None and not df.empty:
         st.warning("Nenhum dado encontrado para o filtro selecionado.")
         st.stop()
 
-    # --- KPIs Globais ---
+    # --- KPIs ---
     qtd_presente = len(df_filtrado[df_filtrado['Status_Individual'] == '🟢 Presente'])
     qtd_falta = len(df_filtrado[df_filtrado['Status_Individual'] == '🔴 Falta'])
     qtd_a_entrar = len(df_filtrado[df_filtrado['Status_Individual'] == '⏳ A Iniciar'])
-    
     qtd_efetivo = qtd_presente + qtd_falta + qtd_a_entrar
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Efetivo Esperado", qtd_efetivo)
     k2.metric("Presentes", qtd_presente)
-    # AJUSTADO: Rótulo agora é apenas "Faltas"
-    k3.metric("Faltas", qtd_falta, delta_color="inverse", help="Postos descobertos (Horário vencido s/ Batida)")
+    k3.metric("Faltas", qtd_falta, delta_color="inverse", help="Postos descobertos")
     k4.metric("Turnos a Iniciar", qtd_a_entrar, delta_color="normal")
     
     st.divider()
@@ -360,28 +365,19 @@ if df is not None and not df.empty:
         faltas = row['Faltas']
         a_entrar = row['A_Entrar']
         
-        # Problema: Tem faltas (já deviam estar lá) mas NINGUÉM chegou
         if presentes == 0:
-            if faltas > 0:
-                return "⚠️ POSSÍVEL PROBLEMA SMARTPHONE"
-            elif a_entrar > 0 and faltas == 0:
-                return "🕒 AGUARDANDO INÍCIO"
-            else:
-                return "⚠️ VERIFICAR"
+            if faltas > 0: return "⚠️ POSSÍVEL PROBLEMA SMARTPHONE"
+            elif a_entrar > 0 and faltas == 0: return "🕒 AGUARDANDO INÍCIO"
+            else: return "⚠️ VERIFICAR"
         
-        # Operação OK
         if faltas == 0:
-            if a_entrar == 0:
-                return "🌟 ESCOLA COMPLETA"
-            else:
-                return "✅ PARCIAL (Aguardando Tarde/Noite)"
+            if a_entrar == 0: return "🌟 ESCOLA COMPLETA"
+            else: return "✅ PARCIAL (Aguardando Tarde/Noite)"
         
-        # Presença Parcial (Cálculo apenas sobre quem já deveria estar lá)
         base_calc = presentes + faltas
         if base_calc > 0:
             perc = (presentes / base_calc) * 100
             return f"{perc:.0f}% Presentes (Turno Atual)"
-        
         return "-"
 
     resumo['Diagnostico'] = resumo.apply(definir_diagnostico, axis=1)
@@ -404,11 +400,9 @@ if df is not None and not df.empty:
     
     c_info1, c_info2 = st.columns(2)
     with c_info1:
-        if qtd_problema > 0:
-            st.error(f"🚨 **{qtd_problema}** escolas com possível problema no Smartphone.")
+        if qtd_problema > 0: st.error(f"🚨 **{qtd_problema}** escolas com possível problema no Smartphone.")
     with c_info2:
-        if qtd_completas > 0:
-            st.success(f"🌟 **{qtd_completas}** escolas com efetivo 100% completo.")
+        if qtd_completas > 0: st.success(f"🌟 **{qtd_completas}** escolas com efetivo 100% completo.")
 
     # --- Tabela Visual ---
     st.markdown(f"### 🏫 Visão por Unidade ({filtro_supervisor})")
@@ -429,11 +423,11 @@ if df is not None and not df.empty:
         }
     )
 
-    # --- Popup ---
+    # --- Popup Detalhe ---
     @st.dialog("Detalhe da Escola", width="large")
     def mostrar_detalhe(escola, supervisor, df_local, diag):
         st.subheader(f"🏫 {escola}")
-        st.caption(f"Supervisor: {supervisor} | Status: {diag} | Data: {data_exibicao}")
+        st.caption(f"Supervisor: {supervisor} | Status: {diag}")
         
         mapa_ordem = {'🔴 Falta': 0, '🟢 Presente': 1, '⏳ A Iniciar': 2, '🟡 S/ Escala': 3}
         df_local['ordem'] = df_local['Status_Individual'].map(mapa_ordem)
