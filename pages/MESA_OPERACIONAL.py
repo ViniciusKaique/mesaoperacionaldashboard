@@ -41,7 +41,7 @@ except Exception as e:
 def fetch_supervisores_db():
     try:
         conn = st.connection("postgres", type="sql")
-        # ATUALIZADO: Buscando o campo "Celular"
+        # ATENÇÃO: Buscando a coluna "Celular" (respeitando maiúscula se foi criado assim)
         query = """
         SELECT 
             u."UnidadeID", 
@@ -55,7 +55,7 @@ def fetch_supervisores_db():
         return df
     except Exception as e:
         st.error(f"Erro DB: {e}")
-        # Colunas de fallback caso dê erro
+        # Retorna dataframe vazio com as colunas esperadas para não quebrar o código
         return pd.DataFrame(columns=["UnidadeID", "Supervisor", "Celular"])
 
 # ==============================================================================
@@ -108,7 +108,7 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
 
     # 2. Merge com DB (UnidadeID = NRESTRUTGEREN)
     df_api['UnidadeID'] = pd.to_numeric(df_api['NRESTRUTGEREN'], errors='coerce').fillna(0).astype(int)
-    # O merge trará a coluna 'Celular' do df_supervisores
+    # O merge trará a coluna 'Celular'
     df_merged = pd.merge(df_api, df_supervisores, on="UnidadeID", how="left")
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
 
@@ -196,11 +196,12 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE DE DISPARO WHATSAPP (NOVO)
+# 6. FUNCIONALIDADE DE DISPARO WHATSAPP
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
     texto_encoded = urllib.parse.quote(mensagem)
     # Remove formatação do telefone para o link (deixa apenas números)
+    # Ex: (11) 99999-9999 vira 11999999999
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
     return f"https://wa.me/55{fone_limpo}?text={texto_encoded}"
 
@@ -227,10 +228,12 @@ def dialog_disparar_alertas(df_completo):
             qtd_faltas = len(df_sup)
             
             # --- PEGA O TELEFONE DO BANCO ---
-            # Verifica se a coluna Celular existe e pega o primeiro valor
+            # Pega o primeiro valor encontrado para o supervisor
             telefone_bruto = None
             if 'Celular' in df_sup.columns:
-                telefone_bruto = df_sup['Celular'].iloc[0]
+                val = df_sup['Celular'].iloc[0]
+                if pd.notna(val) and str(val).strip() != "":
+                    telefone_bruto = val
             
             # Monta a mensagem
             msg_lines = [f"Olá *{supervisor}*, segue o relatório de ausências ({datetime.now().strftime('%H:%M')}):"]
@@ -249,16 +252,16 @@ def dialog_disparar_alertas(df_completo):
             
             # Coluna da Direita: Botão de Ação
             with c2:
-                # Verifica se o telefone existe e não é nulo/vazio
-                if pd.notna(telefone_bruto) and str(telefone_bruto).strip() != "":
+                # Verifica se o telefone existe
+                if telefone_bruto:
                     link = gerar_link_whatsapp(telefone_bruto, msg_final)
                     st.link_button("📲 Enviar WhatsApp", link, use_container_width=True, type="primary")
                 else:
-                    st.error("Sem Telefone")
-                    st.caption("Cadastre a coluna 'Celular' no Banco")
+                    st.warning("Sem Celular")
+                    st.caption(f"Cadastre no Banco")
 
 # ==============================================================================
-# 7. UI - SIDEBAR
+# 7. UI - SIDEBAR (BOTÃO MOVIDO PARA CÁ)
 # ==============================================================================
 def carregar_logo():
     try: return Image.open("logo.png")
@@ -279,10 +282,22 @@ data_selecionada = st.sidebar.date_input("Data de Análise", datetime.now())
 if st.session_state['mesa_data_ref'] != data_selecionada:
     st.session_state['mesa_dados'] = None 
 
+# --- BOTÃO DE ATUALIZAR ---
 if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
     st.session_state['mesa_dados'] = None
     st.cache_data.clear()
     st.rerun()
+
+st.sidebar.divider()
+
+# --- BOTÃO DE DISPARO WHATSAPP (AGORA NA SIDEBAR) ---
+st.sidebar.markdown("### 📢 Ações")
+if st.sidebar.button("📲 Disparar Alertas", use_container_width=True, type="primary"):
+    # Verifica se já carregou os dados
+    if st.session_state['mesa_dados'] is not None and not st.session_state['mesa_dados'].empty:
+        dialog_disparar_alertas(st.session_state['mesa_dados'])
+    else:
+        st.toast("Carregue os dados primeiro!", icon="⚠️")
 
 # ==============================================================================
 # 8. CARREGAMENTO
@@ -304,16 +319,6 @@ data_exibicao = st.session_state['mesa_data_ref'].strftime("%d/%m/%Y")
 # ==============================================================================
 st.title("📉 Monitoramento de Faltas")
 st.caption(f"Dados referentes a: **{data_exibicao}**")
-
-# --- NOVO BLOCO: BOTÃO DE DISPARO ---
-col_head1, col_head2 = st.columns([3, 1])
-with col_head2:
-    if st.button("📢 Disparar Alertas", use_container_width=True, type="primary"):
-        if df is not None and not df.empty:
-            dialog_disparar_alertas(df)
-        else:
-            st.warning("Sem dados para processar.")
-# ------------------------------------
 
 # Filtro Supervisor
 filtro_supervisor = "Todos"
