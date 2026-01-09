@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import requests
+import urllib.parse
 from datetime import datetime, time, date
 from PIL import Image
 from sqlalchemy import text
@@ -40,8 +41,12 @@ except Exception as e:
 def fetch_supervisores_db():
     try:
         conn = st.connection("postgres", type="sql")
+        # ATUALIZADO: Buscando o campo "Celular"
         query = """
-        SELECT u."UnidadeID", s."NomeSupervisor" as "Supervisor"
+        SELECT 
+            u."UnidadeID", 
+            s."NomeSupervisor" as "Supervisor",
+            s."Celular"
         FROM "Unidades" u
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         """
@@ -50,7 +55,8 @@ def fetch_supervisores_db():
         return df
     except Exception as e:
         st.error(f"Erro DB: {e}")
-        return pd.DataFrame(columns=["UnidadeID", "Supervisor"])
+        # Colunas de fallback caso dê erro
+        return pd.DataFrame(columns=["UnidadeID", "Supervisor", "Celular"])
 
 # ==============================================================================
 # 4. API REQUISITION
@@ -102,6 +108,7 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
 
     # 2. Merge com DB (UnidadeID = NRESTRUTGEREN)
     df_api['UnidadeID'] = pd.to_numeric(df_api['NRESTRUTGEREN'], errors='coerce').fillna(0).astype(int)
+    # O merge trará a coluna 'Celular' do df_supervisores
     df_merged = pd.merge(df_api, df_supervisores, on="UnidadeID", how="left")
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
 
@@ -189,7 +196,69 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
     return df_merged
 
 # ==============================================================================
-# 6. UI - SIDEBAR
+# 6. FUNCIONALIDADE DE DISPARO WHATSAPP (NOVO)
+# ==============================================================================
+def gerar_link_whatsapp(telefone, mensagem):
+    texto_encoded = urllib.parse.quote(mensagem)
+    # Remove formatação do telefone para o link (deixa apenas números)
+    fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
+    return f"https://wa.me/55{fone_limpo}?text={texto_encoded}"
+
+@st.dialog("📢 Central de Alertas - WhatsApp", width="large")
+def dialog_disparar_alertas(df_completo):
+    st.caption("Envie mensagens para os supervisores com faltas confirmadas.")
+    
+    # 1. Filtra apenas quem tem falta
+    df_faltas = df_completo[df_completo['Status_Individual'] == '🔴 Falta'].copy()
+    
+    if df_faltas.empty:
+        st.success("🎉 Nenhuma falta registrada para alerta no momento!")
+        return
+
+    # 2. Agrupa por Supervisor
+    supervisores = df_faltas['Supervisor'].unique()
+    
+    for supervisor in supervisores:
+        with st.container(border=True):
+            c1, c2 = st.columns([3, 1])
+            
+            # Pega as faltas desse supervisor
+            df_sup = df_faltas[df_faltas['Supervisor'] == supervisor]
+            qtd_faltas = len(df_sup)
+            
+            # --- PEGA O TELEFONE DO BANCO ---
+            # Verifica se a coluna Celular existe e pega o primeiro valor
+            telefone_bruto = None
+            if 'Celular' in df_sup.columns:
+                telefone_bruto = df_sup['Celular'].iloc[0]
+            
+            # Monta a mensagem
+            msg_lines = [f"Olá *{supervisor}*, segue o relatório de ausências ({datetime.now().strftime('%H:%M')}):"]
+            for escola, dados_escola in df_sup.groupby('Escola'):
+                nomes = ", ".join(dados_escola['Funcionario'].tolist())
+                msg_lines.append(f"\n🏫 *{escola}*:\n🚫 {nomes}")
+            
+            msg_final = "\n".join(msg_lines)
+            
+            # Coluna da Esquerda: Resumo
+            with c1:
+                st.markdown(f"**👤 {supervisor}**")
+                st.caption(f"{qtd_faltas} colaboradores faltantes.")
+                with st.expander("Ver mensagem"):
+                    st.code(msg_final, language=None)
+            
+            # Coluna da Direita: Botão de Ação
+            with c2:
+                # Verifica se o telefone existe e não é nulo/vazio
+                if pd.notna(telefone_bruto) and str(telefone_bruto).strip() != "":
+                    link = gerar_link_whatsapp(telefone_bruto, msg_final)
+                    st.link_button("📲 Enviar WhatsApp", link, use_container_width=True, type="primary")
+                else:
+                    st.error("Sem Telefone")
+                    st.caption("Cadastre a coluna 'Celular' no Banco")
+
+# ==============================================================================
+# 7. UI - SIDEBAR
 # ==============================================================================
 def carregar_logo():
     try: return Image.open("logo.png")
@@ -216,7 +285,7 @@ if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
     st.rerun()
 
 # ==============================================================================
-# 7. CARREGAMENTO
+# 8. CARREGAMENTO
 # ==============================================================================
 if st.session_state['mesa_dados'] is None:
     with st.spinner(f"Buscando dados de {data_selecionada.strftime('%d/%m/%Y')}..."):
@@ -231,10 +300,20 @@ df = st.session_state['mesa_dados']
 data_exibicao = st.session_state['mesa_data_ref'].strftime("%d/%m/%Y")
 
 # ==============================================================================
-# 8. DASHBOARD
+# 9. DASHBOARD
 # ==============================================================================
 st.title("📉 Monitoramento de Faltas")
 st.caption(f"Dados referentes a: **{data_exibicao}**")
+
+# --- NOVO BLOCO: BOTÃO DE DISPARO ---
+col_head1, col_head2 = st.columns([3, 1])
+with col_head2:
+    if st.button("📢 Disparar Alertas", use_container_width=True, type="primary"):
+        if df is not None and not df.empty:
+            dialog_disparar_alertas(df)
+        else:
+            st.warning("Sem dados para processar.")
+# ------------------------------------
 
 # Filtro Supervisor
 filtro_supervisor = "Todos"
