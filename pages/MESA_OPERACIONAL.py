@@ -35,28 +35,37 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. BANCO DE DADOS
+# 3. BANCO DE DADOS (CORRIGIDO PARA DICIONÁRIO)
 # ==============================================================================
-@st.cache_data(ttl=3600)
-def fetch_supervisores_db():
+@st.cache_data(ttl=600)
+def fetch_dados_auxiliares_db():
     try:
         conn = st.connection("postgres", type="sql")
-        # CORREÇÃO: Uso de aspas em "Celular" para garantir que o Postgres ache a coluna
-        query = """
-        SELECT 
-            u."UnidadeID", 
-            s."NomeSupervisor" as "Supervisor",
-            s."Celular"
+        
+        # 1. Busca relação Escola -> Supervisor (Nome) para fallback
+        q_unidades = """
+        SELECT u."UnidadeID", s."NomeSupervisor" as "Supervisor"
         FROM "Unidades" u
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         """
-        df = conn.query(query)
-        df['UnidadeID'] = pd.to_numeric(df['UnidadeID'], errors='coerce').fillna(0).astype(int)
-        return df
+        df_unidades = conn.query(q_unidades)
+        df_unidades['UnidadeID'] = pd.to_numeric(df_unidades['UnidadeID'], errors='coerce').fillna(0).astype(int)
+        
+        # 2. Busca TODOS os telefones direto da tabela Supervisores
+        q_telefones = 'SELECT "NomeSupervisor", "Celular" FROM "Supervisores"'
+        df_telefones = conn.query(q_telefones)
+        
+        # Cria dicionário { 'CLAYTON': '119...', 'SAULO': '119...' }
+        # Normaliza para maiúsculo e sem espaços para garantir o match
+        map_telefones = dict(zip(
+            df_telefones['NomeSupervisor'].str.strip().str.upper(), 
+            df_telefones['Celular']
+        ))
+        
+        return df_unidades, map_telefones
     except Exception as e:
         st.error(f"Erro DB: {e}")
-        # Retorna dataframe vazio com as colunas esperadas para não quebrar o código
-        return pd.DataFrame(columns=["UnidadeID", "Supervisor", "Celular"])
+        return pd.DataFrame(), {}
 
 # ==============================================================================
 # 4. API REQUISITION
@@ -97,7 +106,7 @@ def fetch_mesa_operacional(data_selecionada):
 # ==============================================================================
 # 5. PROCESSAMENTO INTELIGENTE (REGRA DE NEGÓCIO)
 # ==============================================================================
-def processar_dados_unificados(df_api, df_supervisores, data_analise):
+def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise):
     if df_api.empty: return df_api
 
     # 1. Filtro: Atividade Normal
@@ -108,11 +117,16 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
 
     # 2. Merge com DB (UnidadeID = NRESTRUTGEREN)
     df_api['UnidadeID'] = pd.to_numeric(df_api['NRESTRUTGEREN'], errors='coerce').fillna(0).astype(int)
-    # O merge trará a coluna 'Celular'
-    df_merged = pd.merge(df_api, df_supervisores, on="UnidadeID", how="left")
+    
+    # Merge com Unidades (para pegar supervisor se a API falhar ou complementar)
+    df_merged = pd.merge(df_api, df_unidades, on="UnidadeID", how="left")
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
 
-    # 3. Renomear colunas
+    # 3. Vincula Supervisor -> Telefone (pelo Nome, usando o dicionário)
+    df_merged['Supervisor_Key'] = df_merged['Supervisor'].str.strip().str.upper()
+    df_merged['Celular'] = df_merged['Supervisor_Key'].map(map_telefones)
+
+    # 4. Renomear colunas
     df_merged = df_merged.rename(columns={
         'NMESTRUTGEREN': 'Escola', 
         'NMVINCULOM': 'Funcionario',
@@ -143,43 +157,23 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
         batidas = row.get('Batidas')
         escala = row.get('Escala')
         
-        # -----------------------------------------------------------
-        # REGRA 1: PRESENÇA SOBERANA
-        # Se tem batida no dia, é PRESENTE. 
-        # Não importa se atrasou, adiantou ou saiu cedo.
-        # -----------------------------------------------------------
         tem_batida = isinstance(batidas, list) and len(batidas) > 0
         if tem_batida: 
             return '🟢 Presente'
 
-        # -----------------------------------------------------------
-        # REGRA 2: SEM BATIDA (Análise de Falta vs A Iniciar)
-        # -----------------------------------------------------------
         tem_escala = isinstance(escala, list) and len(escala) > 0
-        
         if tem_escala:
-            # Se for dia PASSADO e não bateu = FALTA
-            if eh_passado:
-                return '🔴 Falta'
+            if eh_passado: return '🔴 Falta'
             
-            # Se for HOJE, comparamos com o relógio
             if eh_hoje:
                 hora_inicio = extrair_hora_inicio(escala)
                 if hora_inicio:
-                    if agora >= hora_inicio:
-                        # Já passou da hora de entrar e não tem batida = FALTA
-                        return '🔴 Falta'
-                    else:
-                        # Ainda não deu o horário de entrada = A INICIAR
-                        return '⏳ A Iniciar'
-                else:
-                    # Tem escala mas formato inválido -> Assume Falta para alertar
-                    return '🔴 Falta'
+                    if agora >= hora_inicio: return '🔴 Falta'
+                    else: return '⏳ A Iniciar'
+                else: return '🔴 Falta'
             
-            # Se for FUTURO (Amanhã em diante) = A INICIAR
             return '⏳ A Iniciar'
                 
-        # Se não tem escala e não tem batida
         return '🟡 S/ Escala'
 
     df_merged['Status_Individual'] = df_merged.apply(get_status, axis=1)
@@ -201,7 +195,6 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
 def gerar_link_whatsapp(telefone, mensagem):
     texto_encoded = urllib.parse.quote(mensagem)
     # Remove formatação do telefone para o link (deixa apenas números)
-    # Ex: (11) 99999-9999 vira 11999999999
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
     return f"https://wa.me/55{fone_limpo}?text={texto_encoded}"
 
@@ -227,8 +220,8 @@ def dialog_disparar_alertas(df_completo):
             df_sup = df_faltas[df_faltas['Supervisor'] == supervisor]
             qtd_faltas = len(df_sup)
             
-            # --- PEGA O TELEFONE DO BANCO ---
-            # Pega o primeiro valor encontrado para o supervisor
+            # --- PEGA O TELEFONE DO DATAFRAME ---
+            # Como já cruzamos no processamento, o telefone está na coluna 'Celular'
             telefone_bruto = None
             if 'Celular' in df_sup.columns:
                 val = df_sup['Celular'].iloc[0]
@@ -255,11 +248,10 @@ def dialog_disparar_alertas(df_completo):
                 # Verifica se o telefone existe
                 if telefone_bruto:
                     link = gerar_link_whatsapp(telefone_bruto, msg_final)
-                    # CORREÇÃO: Botão neutro (sem type="primary")
                     st.link_button("📲 Enviar WhatsApp", link, use_container_width=True)
                 else:
                     st.warning("Sem Celular")
-                    st.caption("Cadastre no Banco")
+                    st.caption(f"Verifique o cadastro de '{supervisor}'")
 
 # ==============================================================================
 # 7. UI - SIDEBAR
@@ -294,9 +286,10 @@ if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
 # ==============================================================================
 if st.session_state['mesa_dados'] is None:
     with st.spinner(f"Buscando dados de {data_selecionada.strftime('%d/%m/%Y')}..."):
-        df_sup = fetch_supervisores_db()
+        df_unidades, map_telefones = fetch_dados_auxiliares_db()
         raw_api = fetch_mesa_operacional(data_selecionada)
-        df_proc = processar_dados_unificados(raw_api, df_sup, data_selecionada)
+        df_proc = processar_dados_unificados(raw_api, df_unidades, map_telefones, data_selecionada)
+        
         st.session_state['mesa_dados'] = df_proc
         st.session_state['mesa_data_ref'] = data_selecionada
 
@@ -316,7 +309,6 @@ if df is not None and not df.empty:
     with c_btn1:
         st.info("💡 Clique ao lado para notificar os supervisores sobre as faltas identificadas.")
     with c_btn2:
-        # CORREÇÃO: Botão neutro (sem type="primary")
         if st.button("📢 Disparar Alertas", use_container_width=True):
             dialog_disparar_alertas(df)
     st.markdown("---")
