@@ -18,14 +18,12 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# Inicializa estado dos dados
 if 'mesa_dados' not in st.session_state:
     st.session_state['mesa_dados'] = None
-# Inicializa estado da data dos dados carregados
 if 'mesa_data_ref' not in st.session_state:
     st.session_state['mesa_data_ref'] = None
 
-# Recupera Credenciais (SEGURO: Apenas via Secrets)
+# Recupera Credenciais
 try:
     TOKEN_FIXO = st.secrets["api_portal_gestor"]["token_fixo"]
     CD_OPERADOR = st.secrets["api_portal_gestor"].get("cd_operador", "033555692836")
@@ -35,14 +33,14 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. BANCO DE DADOS (CORRIGIDO PARA DICIONÁRIO)
+# 3. BANCO DE DADOS
 # ==============================================================================
 @st.cache_data(ttl=600)
 def fetch_dados_auxiliares_db():
     try:
         conn = st.connection("postgres", type="sql")
         
-        # 1. Busca relação Escola -> Supervisor (Nome) para fallback
+        # 1. Relação Escola -> Supervisor (Fallback)
         q_unidades = """
         SELECT u."UnidadeID", s."NomeSupervisor" as "Supervisor"
         FROM "Unidades" u
@@ -51,12 +49,11 @@ def fetch_dados_auxiliares_db():
         df_unidades = conn.query(q_unidades)
         df_unidades['UnidadeID'] = pd.to_numeric(df_unidades['UnidadeID'], errors='coerce').fillna(0).astype(int)
         
-        # 2. Busca TODOS os telefones direto da tabela Supervisores
+        # 2. Relação Supervisor -> Celular (DICIONÁRIO INFALÍVEL)
         q_telefones = 'SELECT "NomeSupervisor", "Celular" FROM "Supervisores"'
         df_telefones = conn.query(q_telefones)
         
-        # Cria dicionário { 'CLAYTON': '119...', 'SAULO': '119...' }
-        # Normaliza para maiúsculo e sem espaços para garantir o match
+        # Cria dicionário { 'CLAYTON': '119...', ... }
         map_telefones = dict(zip(
             df_telefones['NomeSupervisor'].str.strip().str.upper(), 
             df_telefones['Celular']
@@ -73,7 +70,6 @@ def fetch_dados_auxiliares_db():
 def fetch_mesa_operacional(data_selecionada):
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
     
-    # Formata a data passada por parâmetro
     data_str = data_selecionada.strftime("%d/%m/%Y")
     
     params = {
@@ -104,29 +100,28 @@ def fetch_mesa_operacional(data_selecionada):
     return pd.DataFrame()
 
 # ==============================================================================
-# 5. PROCESSAMENTO INTELIGENTE (REGRA DE NEGÓCIO)
+# 5. PROCESSAMENTO INTELIGENTE
 # ==============================================================================
 def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise):
     if df_api.empty: return df_api
 
-    # 1. Filtro: Atividade Normal
     if 'NMSITUFUNCH' in df_api.columns:
         df_api = df_api[df_api['NMSITUFUNCH'] == 'Atividade Normal'].copy()
     
     if df_api.empty: return df_api
 
-    # 2. Merge com DB (UnidadeID = NRESTRUTGEREN)
+    # 1. Ajuste de Tipos
     df_api['UnidadeID'] = pd.to_numeric(df_api['NRESTRUTGEREN'], errors='coerce').fillna(0).astype(int)
     
-    # Merge com Unidades (para pegar supervisor se a API falhar ou complementar)
+    # 2. Merge com Unidades (para garantir nome do supervisor se faltar na API)
     df_merged = pd.merge(df_api, df_unidades, on="UnidadeID", how="left")
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
 
-    # 3. Vincula Supervisor -> Telefone (pelo Nome, usando o dicionário)
+    # 3. Injeção do Celular via Dicionário (Mais seguro que join)
     df_merged['Supervisor_Key'] = df_merged['Supervisor'].str.strip().str.upper()
     df_merged['Celular'] = df_merged['Supervisor_Key'].map(map_telefones)
 
-    # 4. Renomear colunas
+    # 4. Renomear
     df_merged = df_merged.rename(columns={
         'NMESTRUTGEREN': 'Escola', 
         'NMVINCULOM': 'Funcionario',
@@ -136,16 +131,13 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
         'OBSERVACAO': 'Obs'
     })
 
-    # --- LÓGICA DE TEMPO ---
+    # Lógica de Horário
     hoje = date.today()
     agora = datetime.now().time()
-    
-    # Flags de tempo
     eh_hoje = (data_analise == hoje)
     eh_passado = (data_analise < hoje)
     
     def extrair_hora_inicio(lista_escala):
-        """ Extrai '13:40' de [['13:40', '17:00']] e converte para time object """
         if not isinstance(lista_escala, list) or not lista_escala: return None
         try:
             str_hora = lista_escala[0][0] 
@@ -157,28 +149,26 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
         batidas = row.get('Batidas')
         escala = row.get('Escala')
         
+        # Tem batida? Presente
         tem_batida = isinstance(batidas, list) and len(batidas) > 0
-        if tem_batida: 
-            return '🟢 Presente'
+        if tem_batida: return '🟢 Presente'
 
+        # Não tem batida, analisa escala
         tem_escala = isinstance(escala, list) and len(escala) > 0
         if tem_escala:
             if eh_passado: return '🔴 Falta'
-            
             if eh_hoje:
                 hora_inicio = extrair_hora_inicio(escala)
                 if hora_inicio:
-                    if agora >= hora_inicio: return '🔴 Falta'
+                    if agora >= hora_inicio: return '🔴 Falta' # Atrasado = Falta até chegar
                     else: return '⏳ A Iniciar'
-                else: return '🔴 Falta'
-            
+                else: return '🔴 Falta' # Escala quebrada
             return '⏳ A Iniciar'
                 
         return '🟡 S/ Escala'
 
     df_merged['Status_Individual'] = df_merged.apply(get_status, axis=1)
 
-    # Formatadores Visuais
     def format_hora(lista):
         if not isinstance(lista, list) or not lista: return "-"
         try: return " | ".join([f"{x[0]}-{x[1]}" for x in lista if len(x) == 2])
@@ -190,68 +180,86 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE DE DISPARO WHATSAPP
+# 6. FUNCIONALIDADE WHATSAPP (CORRIGIDA E MELHORADA)
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
+    # Garante que a mensagem esteja em utf-8 antes de codificar para URL
     texto_encoded = urllib.parse.quote(mensagem)
-    # Remove formatação do telefone para o link (deixa apenas números)
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
     return f"https://wa.me/55{fone_limpo}?text={texto_encoded}"
 
-@st.dialog("📢 Central de Alertas - WhatsApp", width="large")
+@st.dialog("📢 Central de Alertas", width="large")
 def dialog_disparar_alertas(df_completo):
-    st.caption("Envie mensagens para os supervisores com faltas confirmadas.")
+    st.caption("Envie mensagens para os supervisores. Escolas sem registro de ponto serão destacadas.")
     
-    # 1. Filtra apenas quem tem falta
-    df_faltas = df_completo[df_completo['Status_Individual'] == '🔴 Falta'].copy()
+    # 1. Identificar quem tem faltas
+    df_faltas_bruto = df_completo[df_completo['Status_Individual'] == '🔴 Falta']
     
-    if df_faltas.empty:
+    if df_faltas_bruto.empty:
         st.success("🎉 Nenhuma falta registrada para alerta no momento!")
         return
 
-    # 2. Agrupa por Supervisor
-    supervisores = df_faltas['Supervisor'].unique()
+    supervisores_com_falta = df_faltas_bruto['Supervisor'].unique()
     
-    for supervisor in supervisores:
+    for supervisor in supervisores_com_falta:
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             
-            # Pega as faltas desse supervisor
-            df_sup = df_faltas[df_faltas['Supervisor'] == supervisor]
-            qtd_faltas = len(df_sup)
+            # Filtra dados DESTE supervisor (Faltas e Completo para análise)
+            df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
             
-            # --- PEGA O TELEFONE DO DATAFRAME ---
-            # Como já cruzamos no processamento, o telefone está na coluna 'Celular'
+            # Se precisamos saber se a escola teve presenca, precisamos do DF completo filtrado por escola
+            # Mas para otimizar, podemos olhar no df_completo global
+            
+            qtd_faltas = len(df_sup_faltas)
+            
+            # Pega telefone
             telefone_bruto = None
-            if 'Celular' in df_sup.columns:
-                val = df_sup['Celular'].iloc[0]
-                if pd.notna(val) and str(val).strip() != "":
+            if 'Celular' in df_sup_faltas.columns:
+                val = df_sup_faltas['Celular'].iloc[0]
+                if pd.notna(val) and str(val).strip() != "" and str(val).strip().lower() != "none":
                     telefone_bruto = val
             
-            # Monta a mensagem
+            # --- CONSTRUÇÃO INTELIGENTE DA MENSAGEM ---
             msg_lines = [f"Olá *{supervisor}*, segue o relatório de ausências ({datetime.now().strftime('%H:%M')}):"]
-            for escola, dados_escola in df_sup.groupby('Escola'):
-                nomes = ", ".join(dados_escola['Funcionario'].tolist())
-                msg_lines.append(f"\n🏫 *{escola}*:\n🚫 {nomes}")
+            
+            # Itera sobre as escolas que tem faltas
+            for escola, dados_falta in df_sup_faltas.groupby('Escola'):
+                
+                # VERIFICAÇÃO CRÍTICA: Alguém bateu ponto nesta escola?
+                # Olha no DF Completo se existe algum '🟢 Presente' para esta escola
+                # Filtra o df_completo apenas para esta escola e verifica se tem presente
+                tem_presenca = not df_completo[
+                    (df_completo['Escola'] == escola) & 
+                    (df_completo['Status_Individual'] == '🟢 Presente')
+                ].empty
+                
+                # Se não tem presença e tem falta = PROBLEMA DE SMARTPHONE/INTERNET
+                if not tem_presenca:
+                    # Usamos emoji de alerta vermelho
+                    cabecalho = f"🚨 *{escola}* (SEM REGISTRO)"
+                else:
+                    cabecalho = f"🏫 *{escola}*"
+                
+                nomes = ", ".join(dados_falta['Funcionario'].tolist())
+                msg_lines.append(f"\n{cabecalho}:\n🚫 {nomes}")
             
             msg_final = "\n".join(msg_lines)
             
-            # Coluna da Esquerda: Resumo
+            # Exibição
             with c1:
                 st.markdown(f"**👤 {supervisor}**")
-                st.caption(f"{qtd_faltas} colaboradores faltantes.")
+                st.caption(f"{qtd_faltas} ausências identificadas.")
                 with st.expander("Ver mensagem"):
                     st.code(msg_final, language=None)
             
-            # Coluna da Direita: Botão de Ação
             with c2:
-                # Verifica se o telefone existe
                 if telefone_bruto:
                     link = gerar_link_whatsapp(telefone_bruto, msg_final)
                     st.link_button("📲 Enviar WhatsApp", link, use_container_width=True)
                 else:
                     st.warning("Sem Celular")
-                    st.caption(f"Verifique o cadastro de '{supervisor}'")
+                    st.caption("Cadastre no Banco")
 
 # ==============================================================================
 # 7. UI - SIDEBAR
