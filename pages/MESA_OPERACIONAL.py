@@ -180,7 +180,7 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE WHATSAPP (CORRIGIDA E MELHORADA)
+# 6. FUNCIONALIDADE WHATSAPP (COM ORDENAÇÃO E TOTALIZADORES)
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
     # Garante que a mensagem esteja em utf-8 antes de codificar para URL
@@ -190,67 +190,93 @@ def gerar_link_whatsapp(telefone, mensagem):
 
 @st.dialog("📢 Central de Alertas", width="large")
 def dialog_disparar_alertas(df_completo):
-    st.caption("Envie mensagens para os supervisores. Escolas sem registro de ponto serão destacadas.")
+    st.caption("Envie mensagens para os supervisores. Prioriza escolas com possível problema de aparelho.")
     
-    # 1. Identificar quem tem faltas
+    # 1. Filtra apenas as linhas com FALTA
     df_faltas_bruto = df_completo[df_completo['Status_Individual'] == '🔴 Falta']
     
     if df_faltas_bruto.empty:
         st.success("🎉 Nenhuma falta registrada para alerta no momento!")
         return
 
-    supervisores_com_falta = df_faltas_bruto['Supervisor'].unique()
+    supervisores_com_falta = sorted(df_faltas_bruto['Supervisor'].unique())
     
     for supervisor in supervisores_com_falta:
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             
-            # Filtra dados DESTE supervisor (Faltas e Completo para análise)
+            # Dados deste supervisor
             df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
+            df_sup_total = df_completo[df_completo['Supervisor'] == supervisor]
             
-            # Se precisamos saber se a escola teve presenca, precisamos do DF completo filtrado por escola
-            # Mas para otimizar, podemos olhar no df_completo global
+            # --- PREPARAÇÃO DOS DADOS (PARA ORDENAÇÃO) ---
+            escolas_para_mensagem = []
             
-            qtd_faltas = len(df_sup_faltas)
+            # Itera sobre cada escola que tem falta para classificar
+            for escola, dados_falta in df_sup_faltas.groupby('Escola'):
+                # Verifica se TEM ALGUMA PRESENÇA na escola (no dataframe total)
+                tem_presenca = not df_sup_total[
+                    (df_sup_total['Escola'] == escola) & 
+                    (df_sup_total['Status_Individual'] == '🟢 Presente')
+                ].empty
+                
+                eh_problema_app = not tem_presenca
+                
+                # Lista de nomes faltantes
+                lista_nomes = dados_falta['Funcionario'].tolist()
+                
+                escolas_para_mensagem.append({
+                    'escola': escola,
+                    'is_problem': eh_problema_app,
+                    'nomes': lista_nomes,
+                    'qtd_faltas': len(lista_nomes)
+                })
             
-            # Pega telefone
+            # --- ORDENAÇÃO ---
+            # Escolas com problema (True) aparecem primeiro
+            escolas_para_mensagem.sort(key=lambda x: x['is_problem'], reverse=True)
+            
+            # --- CÁLCULO DOS TOTALIZADORES ---
+            total_faltas = sum(e['qtd_faltas'] for e in escolas_para_mensagem)
+            total_escolas_problema = sum(1 for e in escolas_para_mensagem if e['is_problem'])
+            
+            # --- MONTAGEM DA MENSAGEM ---
+            msg_lines = [f"Olá *{supervisor}*, resumo de ausências ({datetime.now().strftime('%H:%M')}):"]
+            
+            # Adiciona Totalizadores no Cabeçalho
+            msg_lines.append(f"📊 *Total Faltas:* {total_faltas}")
+            if total_escolas_problema > 0:
+                msg_lines.append(f"⚠️ *Escolas c/ Problema App:* {total_escolas_problema}")
+            
+            msg_lines.append("") # Linha em branco
+            
+            for item in escolas_para_mensagem:
+                nomes_str = ", ".join(item['nomes'])
+                
+                if item['is_problem']:
+                    cabecalho = f"🚨 *{item['escola']}* (⚠️ POSSÍVEL PROBLEMA SMARTPHONE)"
+                else:
+                    cabecalho = f"🏫 *{item['escola']}*"
+                
+                msg_lines.append(f"{cabecalho}\n🚫 {nomes_str}\n")
+            
+            msg_final = "\n".join(msg_lines).strip()
+            
+            # --- UI: EXIBIÇÃO NO STREAMLIT ---
             telefone_bruto = None
             if 'Celular' in df_sup_faltas.columns:
                 val = df_sup_faltas['Celular'].iloc[0]
                 if pd.notna(val) and str(val).strip() != "" and str(val).strip().lower() != "none":
                     telefone_bruto = val
             
-            # --- CONSTRUÇÃO INTELIGENTE DA MENSAGEM ---
-            msg_lines = [f"Olá *{supervisor}*, segue o relatório de ausências ({datetime.now().strftime('%H:%M')}):"]
-            
-            # Itera sobre as escolas que tem faltas
-            for escola, dados_falta in df_sup_faltas.groupby('Escola'):
-                
-                # VERIFICAÇÃO CRÍTICA: Alguém bateu ponto nesta escola?
-                # Olha no DF Completo se existe algum '🟢 Presente' para esta escola
-                # Filtra o df_completo apenas para esta escola e verifica se tem presente
-                tem_presenca = not df_completo[
-                    (df_completo['Escola'] == escola) & 
-                    (df_completo['Status_Individual'] == '🟢 Presente')
-                ].empty
-                
-                # Se não tem presença e tem falta = PROBLEMA DE SMARTPHONE/INTERNET
-                if not tem_presenca:
-                    # Usamos emoji de alerta vermelho
-                    cabecalho = f"🚨 *{escola}* (SEM REGISTRO)"
-                else:
-                    cabecalho = f"🏫 *{escola}*"
-                
-                nomes = ", ".join(dados_falta['Funcionario'].tolist())
-                msg_lines.append(f"\n{cabecalho}:\n🚫 {nomes}")
-            
-            msg_final = "\n".join(msg_lines)
-            
-            # Exibição
             with c1:
                 st.markdown(f"**👤 {supervisor}**")
-                st.caption(f"{qtd_faltas} ausências identificadas.")
-                with st.expander("Ver mensagem"):
+                # Mostra os contadores visuais para o operador também
+                kpi1, kpi2 = st.columns(2)
+                kpi1.metric("Faltas", total_faltas)
+                kpi2.metric("Escolas Críticas", total_escolas_problema)
+                
+                with st.expander("Ver mensagem gerada"):
                     st.code(msg_final, language=None)
             
             with c2:
