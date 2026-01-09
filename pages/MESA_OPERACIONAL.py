@@ -31,7 +31,6 @@ try:
     NR_ORG = st.secrets["api_portal_gestor"].get("nr_org", "3260")
 except Exception as e:
     st.error("⚠️ Erro de Configuração: Credenciais da API não encontradas no secrets.toml.")
-    st.info("Adicione [api_portal_gestor] com token_fixo no arquivo de segredos.")
     st.stop()
 
 # ==============================================================================
@@ -128,7 +127,6 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
         """ Extrai '13:40' de [['13:40', '17:00']] e converte para time object """
         if not isinstance(lista_escala, list) or not lista_escala: return None
         try:
-            # Pega o primeiro item da primeira sublista
             str_hora = lista_escala[0][0] 
             h, m = map(int, str_hora.split(':'))
             return time(h, m)
@@ -162,16 +160,16 @@ def processar_dados_unificados(df_api, df_supervisores, data_analise):
                 hora_inicio = extrair_hora_inicio(escala)
                 if hora_inicio:
                     if agora >= hora_inicio:
-                        # Já passou da hora de entrar e não tem batida
+                        # Já passou da hora de entrar e não tem batida = FALTA
                         return '🔴 Falta'
                     else:
-                        # Ainda não deu o horário de entrada
+                        # Ainda não deu o horário de entrada = A INICIAR
                         return '⏳ A Iniciar'
                 else:
                     # Tem escala mas formato inválido -> Assume Falta para alertar
                     return '🔴 Falta'
             
-            # Se for FUTURO (Amanhã em diante)
+            # Se for FUTURO (Amanhã em diante) = A INICIAR
             return '⏳ A Iniciar'
                 
         # Se não tem escala e não tem batida
@@ -263,7 +261,8 @@ if df is not None and not df.empty:
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Efetivo Esperado", qtd_efetivo)
     k2.metric("Presentes", qtd_presente)
-    k3.metric("Faltas / Atrasos", qtd_falta, delta_color="inverse")
+    # AJUSTADO: Rótulo agora é apenas "Faltas"
+    k3.metric("Faltas", qtd_falta, delta_color="inverse", help="Postos descobertos (Horário vencido s/ Batida)")
     k4.metric("Turnos a Iniciar", qtd_a_entrar, delta_color="normal")
     
     st.divider()
