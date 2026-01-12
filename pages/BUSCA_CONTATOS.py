@@ -129,7 +129,7 @@ with st.sidebar:
 # ==============================================================================
 # 5. CORPO PRINCIPAL
 # ==============================================================================
-st.title("📡 Extrator de Contatos - HCM Teknisa")
+st.title("📞 Contatos - HCM Teknisa")
 st.markdown("Busca automática de telefones e e-mails de colaboradores ativos.")
 
 nomes_input = st.text_area("📋 Lista de Nomes (Um por linha):", height=200, placeholder="Ex:\nJOAO DA SILVA\nMARIA OLIVEIRA")
