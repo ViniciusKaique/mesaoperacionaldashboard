@@ -10,7 +10,7 @@ from sqlalchemy import text
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-st.set_page_config(page_title="Busca Contatos HCM", layout="wide", page_icon="📞")
+st.set_page_config(page_title="Busca Contatos HCM", layout="wide", page_icon="📱")
 
 # ==============================================================================
 # 2. SEGURANÇA E ESTADO
@@ -19,16 +19,17 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# Recupera Credenciais do Secrets
+# Recupera Credenciais do Secrets (SEM FALLBACK FIXO)
 try:
     SECRETS_HCM = st.secrets["hcm_api"]
     HCM_USER = SECRETS_HCM["usuario"]
     HCM_PASS = SECRETS_HCM["senha"]
     HCM_HASH = SECRETS_HCM["hash_sessao"]
-    HCM_UID_BROWSER = SECRETS_HCM.get("user_id_browser", "lchp1n8y3ka")
+    # Agora é obrigatório estar no secrets. Se não estiver, vai cair no except abaixo.
+    HCM_UID_BROWSER = SECRETS_HCM["user_id_browser"] 
     HCM_PROJECT = SECRETS_HCM.get("project_id", "750")
 except Exception as e:
-    st.error(f"⚠️ Erro de Configuração: {e}")
+    st.error(f"⚠️ Erro de Configuração: Credencial '{e}' não encontrada no secrets.toml.")
     st.stop()
 
 # ==============================================================================
@@ -36,7 +37,7 @@ except Exception as e:
 # ==============================================================================
 
 def get_data_brasil():
-    """Retorna a data e hora atuais no fuso de São Paulo"""
+    """Retorna a data e hora atuais no fuso de São Paulo para log no banco"""
     fuso_br = pytz.timezone('America/Sao_Paulo')
     return datetime.now(fuso_br)
 
@@ -105,14 +106,14 @@ def get_headers_base():
     }
 
 def get_headers_request(token):
-    """Gera headers autenticados usando o ID do navegador (não o do banco)"""
+    """Gera headers autenticados usando o ID do navegador (secrets)"""
     h = get_headers_base()
     h.update({
         "OAuth-Token": token,
         "OAuth-Hash": HCM_HASH,
         "OAuth-KeepConnected": "Yes",
         "OAuth-Project": HCM_PROJECT,
-        "User-Id": HCM_UID_BROWSER, # IMPORTANTE: Usa o ID do browser (secrets), não o ID numérico do banco
+        "User-Id": HCM_UID_BROWSER, 
         "Referer": "https://hcm.teknisa.com//"
     })
     return h
@@ -156,57 +157,37 @@ def login_teknisa_novo():
     return None, None
 
 def validar_token(token):
-    """
-    Testa se o token funciona usando uma busca vazia no endpoint getPessoa.
-    Retorna (True/False, Mensagem de Debug)
-    """
+    """Testa se o token funciona usando uma busca vazia"""
     headers = get_headers_request(token)
-    
-    # Payload de teste: busca alguém que não existe
     payload_teste = {
         "disableLoader": True,
-        "filter": [{"name": "NMPESSOA", "value": "%_TESTE_TOKEN_VALIDATION_%", "operator": "LIKE_I"}],
+        "filter": [{"name": "NMPESSOA", "value": "%_TESTE_TOKEN_%", "operator": "LIKE_I"}],
         "page": 1, "itemsPerPage": 1, "requestType": "FilterData"
     }
-    
     try:
-        # Usamos getPessoa pois sabemos que o usuário tem permissão nele
         r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=payload_teste, timeout=10)
-        
-        if r.status_code == 200:
-            # Se deu 200, o token é válido (mesmo que não ache ninguém)
-            return True, f"Status 200 OK (Teste com getPessoa)"
-        elif r.status_code in [401, 403]:
-            return False, f"Token Expirado (Status {r.status_code})"
-        else:
-            # Outros erros (500, etc) vamos considerar inválido por segurança
-            return False, f"Erro inesperado ({r.status_code})"
-            
+        if r.status_code == 200: return True, f"Status 200 OK"
+        elif r.status_code in [401, 403]: return False, f"Token Expirado ({r.status_code})"
+        else: return False, f"Erro inesperado ({r.status_code})"
     except Exception as e:
-        return False, f"Erro de conexão no teste: {str(e)}"
+        return False, f"Erro de conexão: {str(e)}"
 
 def obter_sessao_valida():
     conn = init_db_token()
-    
-    # 1. TENTA BANCO
     token_db, uid_interno_db, data_token = get_token_db(conn)
     
     if token_db:
         data_fmt = pd.to_datetime(data_token).strftime('%d/%m %H:%M') if data_token else "?"
         st.caption(f"🔎 Analisando token do banco (Gerado: {data_fmt})...")
-        
         is_valid, msg_debug = validar_token(token_db)
         
         if is_valid:
-            st.caption(f"✅ Token VÁLIDO! ({msg_debug}). Usando cache.")
+            st.caption(f"✅ Token VÁLIDO! Usando cache.")
             return token_db, "Banco de Dados"
         else:
-            st.caption(f"⚠️ Token INVÁLIDO ou EXPIRADO. Motivo: {msg_debug}")
-            st.caption("🔄 Iniciando renovação automática...")
+            st.caption(f"⚠️ Token INVÁLIDO ({msg_debug}). Renovando...")
 
-    # 2. LOGIN NOVO
     token_new, uid_interno_new = login_teknisa_novo()
-    
     if token_new:
         save_token_db(conn, token_new, uid_interno_new)
         return token_new, "Nova Autenticação"
@@ -216,6 +197,10 @@ def obter_sessao_valida():
 def formatar_data(data_str):
     if data_str and isinstance(data_str, str): return data_str.split(' ')[0]
     return data_str
+
+def get_competencia_atual():
+    """Retorna o primeiro dia do mês atual (ex: 01/01/2026)"""
+    return datetime.now().strftime("01/%m/%Y")
 
 # ==============================================================================
 # 5. UI PRINCIPAL
@@ -229,8 +214,8 @@ with st.sidebar:
     st.divider()
     if "name" in st.session_state: st.write(f"👤 **{st.session_state['name']}**"); st.divider()
 
-st.title("📡 Extrator de Contatos - HCM")
-st.markdown("Busca inteligente com cache de sessão para máxima performance.")
+st.title("📱Contatos - HCM")
+st.markdown("Busca inteligente com cache de sessão.")
 
 nomes_input = st.text_area("📋 Lista de Nomes (Um por linha):", height=150)
 
@@ -240,18 +225,13 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
     else:
         lista_nomes = [n.strip() for n in nomes_input.split('\n') if n.strip()]
         
-        # --- AUTENTICAÇÃO ---
         with st.status("🔐 Verificando autenticação...", expanded=True) as status:
             token, origem_auth = obter_sessao_valida()
-            
             if not token:
                 status.update(label="❌ Falha crítica de login.", state="error")
                 st.stop()
-            
-            label_auth = "Cache DB ⚡" if origem_auth == "Banco de Dados" else "Renovado 🔄"
-            status.update(label=f"✅ Autenticado! {label_auth}", state="complete", expanded=False)
+            status.update(label=f"✅ Autenticado! ({origem_auth})", state="complete", expanded=False)
 
-        # --- BUSCA ---
         headers = get_headers_request(token)
         relatorio = []
         
@@ -262,15 +242,19 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
         
         total = len(lista_nomes)
         
+        # Gera a data de competência DINÂMICA (sempre dia 01 do mês atual)
+        comp_atual = get_competencia_atual()
+        st.toast(f"Usando competência: {comp_atual}")
+        
         for i, nome in enumerate(lista_nomes):
             txt.caption(f"Processando {i+1}/{total}...")
-            
             try:
-                # 1. Buscar Pessoa
+                # --- Busca Pessoa ---
                 pl_pessoa = {
                     "disableLoader": False,
                     "filter": [
-                        {"name": "P_DTMESCOMPETENC", "operator": "=", "value": "01/12/2025"},
+                        # DATA DINÂMICA APLICADA AQUI:
+                        {"name": "P_DTMESCOMPETENC", "operator": "=", "value": comp_atual},
                         {"name": "P_NRORG", "operator": "=", "value": "3260"},
                         {"name": "NMPESSOA", "value": f"%{nome}%", "operator": "LIKE_I", "isCustomFilter": True}
                     ],
@@ -290,7 +274,7 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
                 
                 if pessoas:
                     for p in pessoas:
-                        # 2. Buscar Contatos
+                        # --- Busca Contatos ---
                         pl_contato = {
                             "filter": [
                                 {"name": "P_NRPARCNEGOCIO", "value": p.get("NRPARCNEGOCIO")},
@@ -332,7 +316,6 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
             
             if relatorio:
                 table_place.dataframe(pd.DataFrame(relatorio), use_container_width=True)
-            
             bar.progress((i + 1) / total)
         
         st.success("Finalizado!")
