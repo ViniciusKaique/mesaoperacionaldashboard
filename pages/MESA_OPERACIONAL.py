@@ -64,10 +64,10 @@ def fetch_dados_auxiliares_db():
         st.error(f"Erro DB: {e}")
         return pd.DataFrame(), {}
 
-def fetch_dados_conae_local(nome_escola):
+def fetch_dados_conae_local(unidade_id):
     """
-    Busca o comparativo Edital vs Real específico para a escola selecionada.
-    Mesma lógica do CONAE.py, filtrada pela unidade.
+    Busca o comparativo Edital vs Real usando o ID da unidade (UnidadeID).
+    Isso resolve o problema de divergência de nomes entre 'PortalGestor' e 'NomeUnidade'.
     """
     try:
         conn = st.connection("postgres", type="sql")
@@ -88,14 +88,14 @@ def fetch_dados_conae_local(nome_escola):
         JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
         JOIN "Cargos" c ON q."CargoID" = c."CargoID"
         LEFT JOIN ContagemReal cr ON q."UnidadeID" = cr."UnidadeID" AND q."CargoID" = cr."CargoID"
-        WHERE u."NomeUnidade" = :escola
+        WHERE q."UnidadeID" = :uid
         ORDER BY c."NomeCargo";
         """
         # ttl=0 garante dados frescos
-        df = conn.query(query, params={"escola": nome_escola}, ttl=0)
+        df = conn.query(query, params={"uid": int(unidade_id)}, ttl=0)
         return df
     except Exception as e:
-        st.error(f"Erro ao buscar dados do CONAE: {e}")
+        # Se der erro (ex: ID não existe no CONAE), retorna vazio silenciosamente
         return pd.DataFrame()
 
 # ==============================================================================
@@ -516,7 +516,7 @@ if df is not None and not df.empty:
             }
         )
 
-        # --- Popup Detalhe (ATUALIZADO COM DADOS CONAE) ---
+        # --- Popup Detalhe (ATUALIZADO COM DADOS CONAE via ID) ---
         @st.dialog("Detalhe da Escola", width="large")
         def mostrar_detalhe(escola, supervisor, df_local, diag):
             st.subheader(f"🏫 {escola}")
@@ -544,11 +544,19 @@ if df is not None and not df.empty:
 
             st.divider()
 
-            # === ABA 2: COMPARATIVO CONAE (NOVO) ===
-            # Usamos um expander para não poluir a visualização inicial, mas permitir acesso rápido
+            # === ABA 2: COMPARATIVO CONAE (CORRIGIDO) ===
             with st.expander("📊 Ver Quadro Comparativo (CONAE)", expanded=False):
                 with st.spinner("Buscando dados do quadro..."):
-                    df_conae = fetch_dados_conae_local(escola)
+                    # CORREÇÃO: Usamos o UnidadeID da primeira linha do dataframe local
+                    # Como df_local é filtrado por escola, todas as linhas têm o mesmo ID.
+                    try:
+                        if not df_local.empty:
+                            uid_target = int(df_local['UnidadeID'].iloc[0])
+                            df_conae = fetch_dados_conae_local(uid_target)
+                        else:
+                             df_conae = pd.DataFrame()
+                    except:
+                        df_conae = pd.DataFrame()
                 
                 if not df_conae.empty:
                     # Cálculo de Totais
