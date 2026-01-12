@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+import pytz # Biblioteca de fuso horário
 from datetime import datetime
 from PIL import Image
 from sqlalchemy import text
@@ -34,47 +35,66 @@ except Exception as e:
 # 3. GERENCIAMENTO DE BANCO DE DADOS (TOKEN CACHE)
 # ==============================================================================
 
+def get_data_brasil():
+    """Retorna a data e hora atuais no fuso de São Paulo"""
+    fuso_br = pytz.timezone('America/Sao_Paulo')
+    return datetime.now(fuso_br)
+
 def init_db_token():
     """Cria a tabela HCMTokens se não existir"""
     conn = st.connection("postgres", type="sql")
-    with conn.session as session:
-        # Usamos aspas duplas "HCMTokens" para respeitar as maiúsculas no PostgreSQL
-        session.execute(text("""
-            CREATE TABLE IF NOT EXISTS public."HCMTokens" (
-                id VARCHAR(50) PRIMARY KEY,
-                access_token TEXT,
-                user_uid TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """))
-        session.commit()
+    try:
+        with conn.session as session:
+            # Criação da tabela (Aspas duplas no nome para garantir Case Sensitive)
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS public."HCMTokens" (
+                    id VARCHAR(50) PRIMARY KEY,
+                    access_token TEXT,
+                    user_uid TEXT,
+                    updated_at TIMESTAMP
+                );
+            """))
+            session.commit()
+    except Exception as e:
+        st.error(f"Erro ao inicializar tabela de tokens: {e}")
     return conn
 
 def get_token_db(conn):
     """Busca o token salvo no banco"""
     try:
-        # Aspas duplas no nome da tabela para o SELECT também
-        df = conn.query('SELECT access_token, user_uid FROM public."HCMTokens" WHERE id = \'bot_hcm_contact\'', ttl=0)
+        # Aspas duplas "HCMTokens" são OBRIGATÓRIAS se a tabela foi criada com maiúsculas
+        query = 'SELECT access_token, user_uid, updated_at FROM public."HCMTokens" WHERE id = \'bot_hcm_contact\''
+        df = conn.query(query, ttl=0)
+        
         if not df.empty:
-            return df.iloc[0]['access_token'], df.iloc[0]['user_uid']
-    except Exception:
+            token = df.iloc[0]['access_token']
+            uid = df.iloc[0]['user_uid']
+            data_salva = df.iloc[0]['updated_at']
+            return token, uid, data_salva
+            
+    except Exception as e:
+        # Mostra o erro para sabermos por que falhou a busca no banco
+        st.warning(f"⚠️ Erro ao ler do banco (Ignorando cache): {e}")
         pass
-    return None, None
+        
+    return None, None, None
 
 def save_token_db(conn, token, uid):
-    """Salva ou atualiza o token no banco"""
+    """Salva ou atualiza o token no banco com horário do Brasil"""
+    agora_br = get_data_brasil()
+    
     try:
         with conn.session as session:
-            # Upsert na tabela correta
             query = text("""
                 INSERT INTO public."HCMTokens" (id, access_token, user_uid, updated_at)
-                VALUES ('bot_hcm_contact', :token, :uid, NOW())
+                VALUES ('bot_hcm_contact', :token, :uid, :hora)
                 ON CONFLICT (id) DO UPDATE 
                 SET access_token = EXCLUDED.access_token,
                     user_uid = EXCLUDED.user_uid,
-                    updated_at = NOW();
+                    updated_at = EXCLUDED.updated_at;
             """)
-            session.execute(query, {"token": token, "uid": uid})
+            # Passamos a data do Python (:hora) em vez de usar NOW() do banco
+            session.execute(query, {"token": token, "uid": uid, "hora": agora_br})
             session.commit()
     except Exception as e:
         st.error(f"Erro ao salvar token no banco: {e}")
@@ -119,7 +139,7 @@ def login_teknisa_novo():
     }
 
     try:
-        r = requests.post(url_login, headers=headers, json=payload, timeout=20)
+        r = requests.post(url_login, headers=headers, json=payload, timeout=25)
         r.raise_for_status()
         data = r.json()
         
@@ -131,7 +151,7 @@ def login_teknisa_novo():
     return None, None
 
 def validar_token(token, uid):
-    """Testa se o token atual ainda funciona fazendo uma requisição leve"""
+    """Testa se o token atual ainda funciona"""
     headers = get_headers_base()
     headers.update({
         "OAuth-Token": token,
@@ -139,39 +159,56 @@ def validar_token(token, uid):
         "OAuth-Project": HCM_PROJECT,
         "User-Id": str(uid)
     })
-    # Tenta buscar as empresas (request leve) para validar sessão
+    
     try:
+        # Faz uma requisição leve para testar a validade
         r = requests.post(
             "https://hcm.teknisa.com/backend/index.php/getEmpresa", 
             headers=headers, 
             json={"filter": [], "page": 1, "itemsPerPage": 1, "requestType": "FilterData"},
-            timeout=5
+            timeout=10 
         )
-        # Se retornar 200 e tiver dataset, o token está vivo
         return r.status_code == 200 and "dataset" in r.json()
     except:
         return False
 
 def obter_sessao_valida():
-    """Orquestrador: Banco -> Valida -> (Login se necessário) -> Salva"""
+    """
+    Lógica de Prioridade:
+    1. Banco de Dados
+    2. Login Novo (apenas se BD falhar ou token inválido)
+    """
     conn = init_db_token()
     
-    # 1. Tenta pegar do banco
-    token_db, uid_db = get_token_db(conn)
+    # 1. TENTA BANCO PRIMEIRO
+    token_db, uid_db, data_token = get_token_db(conn)
     
     if token_db:
-        # 2. Se achou, valida se não expirou
+        # Formata a data para exibir no log (apenas visual)
+        try:
+            data_fmt = pd.to_datetime(data_token).strftime('%d/%m %H:%M')
+        except: 
+            data_fmt = "?"
+
+        st.caption(f"🔎 Token encontrado no BD (Gerado em: {data_fmt}). Testando validade...")
+        
         if validar_token(token_db, uid_db):
-            return token_db, uid_db, "Cache (Banco de Dados)"
-    
-    # 3. Se não achou ou expirou, faz login novo
+            st.toast("Token do banco VÁLIDO! Usando cache.", icon="⚡")
+            return token_db, uid_db, "Banco de Dados"
+        else:
+            st.caption("⚠️ Token do banco EXPIRADO. Gerando novo...")
+    else:
+        st.caption("ℹ️ Nenhum token no banco ou erro na leitura.")
+
+    # 2. SE FALHOU ACIMA, GERA UM NOVO
+    st.caption("🔄 Conectando API Login...")
     token_new, uid_new = login_teknisa_novo()
     
     if token_new:
         save_token_db(conn, token_new, uid_new)
-        return token_new, uid_new, "Novo Login (API)"
+        return token_new, uid_new, "Nova Autenticação"
         
-    return None, None, "Falha"
+    return None, None, "Falha Crítica"
 
 def get_headers_request(token, uid):
     h = get_headers_base()
@@ -201,7 +238,7 @@ with st.sidebar:
     st.divider()
     if "name" in st.session_state: st.write(f"👤 **{st.session_state['name']}**"); st.divider()
 
-st.title("📱Contatos - HCM")
+st.title("📡 Extrator de Contatos - HCM")
 st.markdown("Busca inteligente com cache de sessão para máxima performance.")
 
 nomes_input = st.text_area("📋 Lista de Nomes (Um por linha):", height=150)
@@ -220,8 +257,8 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
                 status.update(label="❌ Falha crítica de login. Verifique as credenciais.", state="error")
                 st.stop()
             
-            msg_auth = "Token recuperado do Banco de Dados ⚡" if "Cache" in origem_auth else "Token renovado com sucesso 🔄"
-            status.update(label=f"✅ Autenticado! {msg_auth}", state="complete", expanded=False)
+            label_auth = "Cache DB (Rápido) ⚡" if origem_auth == "Banco de Dados" else "Login Realizado 🔄"
+            status.update(label=f"✅ Autenticado! {label_auth}", state="complete", expanded=False)
 
         # --- LOOP DE BUSCA ---
         headers = get_headers_request(token, uid)
@@ -249,14 +286,18 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
                     "page": 1, "itemsPerPage": 50, "requestType": "FilterData"
                 }
                 
-                # Retry simples se der erro de rede
+                # Retry simples
                 try:
                     r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=pl_pessoa, timeout=10)
                 except:
-                    time.sleep(1) # Espera e tenta de novo
+                    time.sleep(1) 
                     r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=pl_pessoa, timeout=10)
 
-                pessoas = r.json().get("dataset", {}).get("getPessoa", [])
+                # Tratamento para JSON inválido
+                try: resp_json = r.json()
+                except: resp_json = {}
+                
+                pessoas = resp_json.get("dataset", {}).get("getPessoa", [])
                 
                 if pessoas:
                     for p in pessoas:
@@ -270,13 +311,14 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
                         }
                         
                         r_c = requests.post("https://hcm.teknisa.com/backend/index.php/getFormaComunicacaoParc", headers=headers, json=pl_contato)
-                        contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
+                        try: contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
+                        except: contatos = []
                         
-                        # Fallback sem Org se vazio
                         if not contatos:
                             pl_contato["filter"] = [{"name": "P_NRPARCNEGOCIO", "value": p.get("NRPARCNEGOCIO")}]
                             r_c = requests.post("https://hcm.teknisa.com/backend/index.php/getFormaComunicacaoParc", headers=headers, json=pl_contato)
-                            contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
+                            try: contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
+                            except: contatos = []
 
                         lista_contatos = []
                         termos = ["MAIL", "CEL", "FONE", "WHATS", "TEL"]
