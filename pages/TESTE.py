@@ -7,7 +7,7 @@ from PIL import Image
 from sqlalchemy import text
 
 # ==============================================================================
-# CONFIGURAÇÕES INICIAIS
+# CONFIGURAÇÕES
 # ==============================================================================
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
@@ -15,19 +15,11 @@ def configurar_pagina():
     <style>
         .block-container { padding-top: 1rem; }
         [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
-        .dataframe { font-size: 14px !important; }
-        
-        th, td { text-align: center !important; }
+        /* Centralizar textos nas células da tabela */
         .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
             justify-content: center !important;
             text-align: center !important;
         }
-
-        div[data-testid="stSpinner"] > div {
-            font-size: 28px !important;
-            font-weight: bold !important; color: #ff4b4b !important; white-space: nowrap;
-        }
-
         div.stButton > button { width: 100%; display: block; margin: 0 auto; }
     </style>
     """, unsafe_allow_html=True)
@@ -51,7 +43,7 @@ def realizar_login():
         )
         
         if not st.session_state.get("authentication_status"):
-            st.write(""); st.write(""); st.write(""); st.write(""); st.write("")
+            st.write(""); st.write(""); st.write("");
             col_esq, col_centro, col_dir = st.columns([3, 2, 3])
             with col_centro:
                 authenticator.login()
@@ -65,7 +57,7 @@ def realizar_login():
         st.stop()
 
 # ==============================================================================
-# QUERIES E DADOS
+# BANCO DE DADOS
 # ==============================================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_auxiliares(_conn):
@@ -114,16 +106,13 @@ def buscar_dados_operacionais(_conn):
     df_pessoas = _conn.query(query_funcionarios)
 
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
-    df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
     df_resumo['Status_Codigo'] = np.select(condicoes, ['FALTA', 'EXCEDENTE'], default='OK')
+    df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
     df_resumo['Diferenca_Display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
     df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
     
     return df_resumo, df_pessoas
 
-# ==============================================================================
-# LÓGICA DE ATUALIZAÇÃO (DB)
-# ==============================================================================
 def acao_atualizar_data(unidade_id, nova_data, conn):
     try:
         with conn.session as session:
@@ -136,287 +125,216 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
         st.toast("Data salva!", icon="✅")
         st.rerun()
     except Exception as e:
-        st.error(f"Erro ao salvar data: {e}")
+        st.error(f"Erro: {e}")
 
 # ==============================================================================
-# MODAL DE DETALHE (Substitui o Expander)
+# MODAL DE DETALHES
 # ==============================================================================
 @st.dialog("🏫 Detalhes da Unidade", width="large")
-def detalhar_escola(nome_escola, stats_row, df_cargos_view, df_pessoas_view, conn, df_unidades_bd, df_cargos_bd):
+def modal_detalhe_escola(escola_nome, row_stats, df_cargos, df_pessoas, conn, df_unidades_list, df_cargos_list):
     
-    # 1. Cabeçalho e Data
-    c_sup, c_btn = st.columns([3, 1.5])
-    with c_sup: 
-        st.markdown(f"**👨‍💼 Supervisor:** {stats_row['Supervisor']}")
-    with c_btn:
-        data_atual = stats_row['DataConferencia']
-        unidade_id = int(stats_row['UnidadeID'])
-        label_botao = "⚠️ Pendente" if pd.isnull(data_atual) else f"📅 Conferido: {data_atual.strftime('%d/%m/%Y')}"
-        
-        with st.popover(label_botao, use_container_width=True):
-            st.markdown("Alterar data de conferência")
-            nova_data_input = st.date_input("Nova Data:", value=pd.Timestamp.today() if pd.isnull(data_atual) else data_atual, format="DD/MM/YYYY", key=f"dt_mod_{unidade_id}")
-            if st.button("💾 Salvar Data", key=f"save_mod_{unidade_id}"):
-                acao_atualizar_data(unidade_id, nova_data_input, conn)
+    # 1. Info e Data
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.markdown(f"**Supervisor:** {row_stats['Supervisor']}")
+        st.markdown(f"**Tipo:** {row_stats['Tipo']}")
+    with c2:
+        dt_atual = row_stats['DataConferencia']
+        lbl = "⚠️ Conferência Pendente" if pd.isnull(dt_atual) else f"📅 Conferido: {dt_atual.strftime('%d/%m/%Y')}"
+        with st.popover(lbl, use_container_width=True):
+            nova_dt = st.date_input("Data:", value=pd.Timestamp.today() if pd.isnull(dt_atual) else dt_atual, format="DD/MM/YYYY")
+            if st.button("Salvar Data"):
+                acao_atualizar_data(int(row_stats['UnidadeID']), nova_dt, conn)
 
-    # 2. Métricas Visuais (HTML)
+    # 2. Resumo Visual
+    # Definindo cores e sinais para o resumo visual
+    saldo_val = row_stats['Saldo']
+    cor_resumo = '#ff4b4b' if saldo_val < 0 else ('#29b6f6' if saldo_val > 0 else '#00c853')
+    sinal_resumo = '+' if saldo_val > 0 else ''
+
     st.markdown(f"""
-    <div style='display: flex; justify-content: space-around; background-color: #262730; padding: 8px; border-radius: 5px; margin: 5px 0 15px 0; border: 1px solid #404040;'>
-        <span>📋 Edital: <b>{stats_row['Edital']}</b></span>
-        <span>👥 Real: <b>{stats_row['Real']}</b></span>
-        <span>⚖️ Saldo: <b style='color: {stats_row['Cor']}'>{stats_row['Sinal']}{stats_row['Saldo']}</b></span>
+    <div style='display: flex; justify-content: space-around; background-color: #f0f2f6; padding: 10px; border-radius: 8px; margin-bottom: 15px; color: black;'>
+        <span>📋 Edital: <b>{row_stats['Edital']}</b></span>
+        <span>👥 Real: <b>{row_stats['Real']}</b></span>
+        <span>⚖️ Saldo: <b style='color: {cor_resumo}'>{sinal_resumo}{saldo_val}</b></span>
     </div>
     """, unsafe_allow_html=True)
 
     # 3. Tabela de Cargos
-    st.markdown("#### 📊 Quadro de Vagas")
-    df_tabela_final = df_cargos_view[['Cargo','Edital','Real','Diferenca','Status']]
-    
-    def estilo_linha_escola(row):
-        styles = ['text-align: center;'] * 5
-        val = str(row['Diferenca'])
-        if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-        elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-        else: styles[3] += 'color: #00c853; font-weight: bold;'
-        
-        stt = str(row['Status'])
-        if '🔴' in stt: styles[4] += 'color: #ff4b4b; font-weight: bold;'
-        elif '🔵' in stt: styles[4] += 'color: #29b6f6; font-weight: bold;'
-        else: styles[4] += 'color: #00c853; font-weight: bold;'
-        return styles
-    
-    st.dataframe(df_tabela_final.style.apply(estilo_linha_escola, axis=1), use_container_width=True, hide_index=True)
+    st.caption("📊 Quadro de Vagas")
+    df_view = df_cargos[['Cargo','Edital','Real','Diferenca_Display','Status_Display']].rename(columns={'Diferenca_Display':'Diferenca', 'Status_Display':'Status'})
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
 
-    # 4. Lista de Colaboradores e Edição
-    st.markdown("#### 📋 Colaboradores (Selecione para Editar)")
-    
-    if not df_pessoas_view.empty:
-        # Tabela selecionável dentro do modal
-        event_colab = st.dataframe(
-            df_pessoas_view[['ID','Funcionario','Cargo']], 
-            use_container_width=True, 
-            hide_index=True, 
-            on_select="rerun", 
-            selection_mode="single-row", 
-            key=f"grid_modal_{unidade_id}"
+    # 4. Lista de Pessoas com Edição
+    st.caption("📋 Colaboradores (Selecione para Editar)")
+    if not df_pessoas.empty:
+        event = st.dataframe(
+            df_pessoas[['ID','Funcionario','Cargo']],
+            use_container_width=True, hide_index=True,
+            selection_mode="single-row", on_select="rerun"
         )
         
-        if len(event_colab.selection.rows) > 0:
-            idx_sel = event_colab.selection.rows[0]
-            dados_colab = df_pessoas_view.iloc[idx_sel]
+        if len(event.selection.rows) > 0:
+            idx = event.selection.rows[0]
+            colab = df_pessoas.iloc[idx]
             
-            # Formulário de edição (substitui o antigo dialog aninhado)
-            with st.expander(f"✏️ Editar: {dados_colab['Funcionario']}", expanded=True):
-                with st.form(key=f"form_edit_{dados_colab['ID']}"):
-                    lista_escolas = df_unidades_bd['NomeUnidade'].tolist()
-                    try: idx_escola = lista_escolas.index(stats_row.name) # Nome da escola atual
-                    except: idx_escola = 0
-                    nova_escola = st.selectbox("🏫 Mover para Escola:", lista_escolas, index=idx_escola)
-
-                    lista_cargos_bd = df_cargos_bd['NomeCargo'].tolist()
-                    try: idx_cargo = lista_cargos_bd.index(dados_colab['Cargo'])
-                    except: idx_cargo = 0
-                    novo_cargo = st.selectbox("💼 Alterar Cargo:", lista_cargos_bd, index=idx_cargo)
-
-                    novo_status = st.checkbox("✅ Manter Ativo?", value=True)
+            with st.expander(f"✏️ Editar: {colab['Funcionario']}", expanded=True):
+                with st.form(f"edit_{colab['ID']}"):
+                    lst_esc = df_unidades_list['NomeUnidade'].tolist()
+                    lst_car = df_cargos_list['NomeCargo'].tolist()
                     
-                    if st.form_submit_button("💾 Confirmar Alteração"):
-                        novo_uid = int(df_unidades_bd[df_unidades_bd['NomeUnidade'] == nova_escola]['UnidadeID'].iloc[0])
-                        novo_cid = int(df_cargos_bd[df_cargos_bd['NomeCargo'] == novo_cargo]['CargoID'].iloc[0])
-                        colab_id = int(dados_colab['ID'])
-                        
+                    try: i_esc = lst_esc.index(escola_nome)
+                    except: i_esc = 0
+                    try: i_car = lst_car.index(colab['Cargo'])
+                    except: i_car = 0
+                    
+                    n_esc = st.selectbox("Escola:", lst_esc, index=i_esc)
+                    n_car = st.selectbox("Cargo:", lst_car, index=i_car)
+                    n_atv = st.checkbox("Ativo?", value=True)
+                    
+                    if st.form_submit_button("💾 Salvar"):
                         try:
-                            with conn.session as session:
-                                session.execute(text("UPDATE \"Colaboradores\" SET \"UnidadeID\" = :uid, \"CargoID\" = :cid, \"Ativo\" = :ativo WHERE \"ColaboradorID\" = :id"), 
-                                                {"uid": novo_uid, "cid": novo_cid, "ativo": novo_status, "id": colab_id})
-                                session.commit()
-                            st.cache_data.clear() 
-                            st.toast("Colaborador atualizado!", icon="🎉")
+                            uid_new = int(df_unidades_list[df_unidades_list['NomeUnidade'] == n_esc]['UnidadeID'].iloc[0])
+                            cid_new = int(df_cargos_list[df_cargos_list['NomeCargo'] == n_car]['CargoID'].iloc[0])
+                            
+                            with conn.session as s:
+                                s.execute(text('UPDATE "Colaboradores" SET "UnidadeID"=:u, "CargoID"=:c, "Ativo"=:a WHERE "ColaboradorID"=:i'), 
+                                          {'u': uid_new, 'c': cid_new, 'a': n_atv, 'i': int(colab['ID'])})
+                                s.commit()
+                            st.cache_data.clear()
+                            st.toast("Sucesso!", icon="🎉")
                             st.rerun()
-                        except Exception as e: st.error(f"Erro: {e}")
+                        except Exception as e:
+                            st.error(f"Erro: {e}")
     else:
-        st.info("Nenhum colaborador alocado nesta unidade.")
+        st.info("Nenhum colaborador nesta unidade.")
 
 # ==============================================================================
-# UI COMPONENTS
-# ==============================================================================
-def exibir_sidebar(authenticator, nome_usuario):
-    with st.sidebar:
-        if logo := carregar_logo(): st.image(logo, use_container_width=True)
-        st.divider()
-        st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar'); st.divider()
-        st.info("Painel Gerencial + Detalhe")
-
-def exibir_metricas_topo(df):
-    c1, c2, c3 = st.columns(3)
-    total_edital = int(df['Edital'].sum())
-    total_real = int(df['Real'].sum())
-    saldo = total_real - total_edital
-    
-    with c1: st.markdown("**<div style='font-size:18px'>📋 Total Edital</div>**", unsafe_allow_html=True); st.metric("", total_edital)
-    with c2: st.markdown("**<div style='font-size:18px'>👥 Efetivo Atual</div>**", unsafe_allow_html=True); st.metric("", total_real)
-    with c3: st.markdown("**<div style='font-size:18px'>⚖️ Saldo Geral</div>**", unsafe_allow_html=True); st.metric("", saldo)
-    st.markdown("---")
-
-def exibir_graficos_gerais(df):
-    with st.expander("📈 Ver Gráficos e Resumo Geral", expanded=True):
-        df_agrupado = df.groupby('Cargo')[['Edital','Real']].sum().reset_index()
-        df_agrupado['Diff_Display'] = (df_agrupado['Real'] - df_agrupado['Edital']).apply(lambda x: f"+{x}" if x > 0 else str(x))
-        
-        c_g1, c_g2 = st.columns([2,1])
-        with c_g1: 
-            fig = px.bar(df_agrupado.melt(id_vars=['Cargo'], value_vars=['Edital','Real'], var_name='Tipo', value_name='Quantidade'), 
-                         x='Cargo', y='Quantidade', color='Tipo', barmode='group', 
-                         color_discrete_map={'Edital': '#808080','Real': '#00bfff'}, text_auto=True, template="seaborn")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with c_g2: 
-            def estilo_tabela(row):
-                styles = ['text-align: center;'] * 4
-                val = str(row['Diferenca'])
-                if '-' in val: styles[3] += 'color: #ff4b4b; font-weight: bold;'
-                elif '+' in val: styles[3] += 'color: #29b6f6; font-weight: bold;'
-                else: styles[3] += 'color: #00c853; font-weight: bold;'
-                return styles
-            
-            df_display = df_agrupado[['Cargo','Edital','Real','Diff_Display']].rename(columns={'Diff_Display':'Diferenca'})
-            st.dataframe(df_display.style.apply(estilo_tabela, axis=1), use_container_width=True, hide_index=True)
-
-# ==============================================================================
-# MAIN
+# INTERFACE PRINCIPAL
 # ==============================================================================
 def main():
     configurar_pagina()
     authenticator, nome_usuario = realizar_login()
     
     if authenticator:
-        exibir_sidebar(authenticator, nome_usuario)
+        with st.sidebar:
+            if l := carregar_logo(): st.image(l, use_container_width=True)
+            st.divider()
+            st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar')
         
-        try:
-            conn = st.connection("postgres", type="sql")
+        conn = st.connection("postgres", type="sql")
+        df_unidades_list, df_cargos_list = buscar_dados_auxiliares(conn)
+        df_resumo, df_pessoas = buscar_dados_operacionais(conn)
+        
+        st.title("📊 Mesa Operacional")
+        
+        # --- FILTROS ---
+        c1, c2, c3, c4 = st.columns([1.5, 1.5, 1, 1.5])
+        with c1: f_esc = st.selectbox("Escola", ["Todas"] + sorted(df_resumo['Escola'].unique().tolist()))
+        with c2: f_sup = st.selectbox("Supervisor", ["Todos"] + sorted(df_resumo['Supervisor'].unique().tolist()))
+        with c3: f_sts = st.selectbox("Situação", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟢 OK"])
+        with c4: f_txt = st.text_input("Buscar Pessoa", "")
+
+        # --- PROCESSAMENTO DOS DADOS PARA A LISTA ---
+        # 1. Filtra
+        mask = pd.Series([True] * len(df_resumo))
+        if f_esc != "Todas": mask &= (df_resumo['Escola'] == f_esc)
+        if f_sup != "Todos": mask &= (df_resumo['Supervisor'] == f_sup)
+        
+        df_filtrado = df_resumo[mask].copy()
+        cols_calc = ['Edital', 'Real']
+        df_filtrado[cols_calc] = df_filtrado[cols_calc].apply(pd.to_numeric, errors='coerce').fillna(0).astype(int)
+        
+        # 2. Agrupa por Escola
+        # Adicionado 'Tipo' na agregação
+        df_lista = df_filtrado.groupby('Escola').agg({
+            'Edital': 'sum', 'Real': 'sum',
+            'Supervisor': 'first',
+            'Tipo': 'first',  # <--- Adicionado Tipo
+            'UnidadeID': 'first', 'DataConferencia': 'first',
+            'Status_Codigo': lambda x: list(x)
+        }).reset_index()
+        
+        # 3. Calcula Saldos e Status
+        df_lista['Saldo'] = df_lista['Real'] - df_lista['Edital']
+        
+        def definir_icone(row):
+            saldo = row['Saldo']
+            if saldo < 0: return "🔴"
+            if saldo > 0: return "🔵"
+            if 'FALTA' in row['Status_Codigo']: return "🟡" 
+            return "✅"
+
+        df_lista['Icone'] = df_lista.apply(definir_icone, axis=1)
+        
+        # 4. Filtro Final de Status
+        if f_sts != "Todas":
+            mapa_filtro = {"🔴 FALTA": ["🔴", "🟡"], "🔵 EXCEDENTE": ["🔵"], "🟢 OK": ["✅"]}
+            icones_validos = mapa_filtro.get(f_sts, [])
+            df_lista = df_lista[df_lista['Icone'].isin(icones_validos)]
+
+        if f_txt:
+            escolas_match = df_pessoas[df_pessoas['Funcionario'].str.contains(f_txt, case=False, na=False) | 
+                                     df_pessoas['ID'].astype(str).str.contains(f_txt, na=False)]['Escola'].unique()
+            df_lista = df_lista[df_lista['Escola'].isin(escolas_match)]
+
+        # Ordenação
+        df_lista['sort_key'] = df_lista['Icone'].map({"🔴": 0, "🟡": 1, "🔵": 2, "✅": 3})
+        df_lista = df_lista.sort_values(['sort_key', 'Escola'])
+
+        # --- EXIBIÇÃO DA LISTA ---
+        st.divider()
+        st.info(f"**{len(df_lista)} Unidades Encontradas.** Clique na linha para gerenciar.")
+        
+        if not df_lista.empty:
+            # Seleciona e renomeia colunas para exibição
+            # Icone -> Status
+            df_show = df_lista[['Icone', 'Tipo', 'Escola', 'Supervisor', 'Edital', 'Real', 'Saldo']].rename(columns={'Icone': 'Status'})
             
-            df_unidades, df_cargos = buscar_dados_auxiliares(conn)
-            df_resumo, df_pessoas = buscar_dados_operacionais(conn)
-            
-            st.title("📊 Mesa Operacional")
-            exibir_metricas_topo(df_resumo)
-            exibir_graficos_gerais(df_resumo)
+            # Função de Estilo para o Saldo (Cores)
+            def colorir_saldo(val):
+                if val < 0: return 'color: #ff4b4b; font-weight: bold;' # Vermelho
+                elif val > 0: return 'color: #29b6f6; font-weight: bold;' # Azul
+                return 'color: #00c853; font-weight: bold;' # Verde
 
-            st.markdown("---"); st.subheader("🏫 Lista de Escolas")
+            # Aplica o estilo apenas na coluna Saldo
+            styler = df_show.style.map(colorir_saldo, subset=['Saldo'])
 
-            # --- FILTROS ---
-            c_f1, c_f2, c_f3, c_f4 = st.columns([1.2, 1.2, 1, 1])
-            with c_f1: filtro_escola = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_resumo['Escola'].unique())))
-            with c_f2: filtro_supervisor = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
-            with c_f3: filtro_situacao = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
-            with c_f4: termo_busca = st.text_input("👤 Buscar Colaborador:", "")
+            event = st.dataframe(
+                styler,
+                use_container_width=True,
+                hide_index=True,
+                selection_mode="single-row",
+                on_select="rerun",
+                column_config={
+                    "Status": st.column_config.TextColumn("Status", width="small", help="🔴 Falta | 🔵 Excedente | 🟡 Ajuste Interno | ✅ Ok"),
+                    "Tipo": st.column_config.TextColumn("Tipo", width="small"),
+                    "Escola": st.column_config.TextColumn("Unidade Escolar", width="large"),
+                    "Saldo": st.column_config.NumberColumn("Saldo", format="%+d") # Formata com sinal (+/-)
+                }
+            )
 
-            # Filtros de Cargos (Linha extra)
-            lista_cargos_filtro = list(df_resumo['Cargo'].unique())
-            filtro_comb = {}
-            if st.checkbox("Exibir Filtros por Cargo"):
-                cols = st.columns(5)
-                for i, cargo in enumerate(lista_cargos_filtro):
-                    with cols[i % 5]:
-                        if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'f_{i}')) != "Todos": 
-                            filtro_comb[cargo] = sel
-
-            # --- APLICAÇÃO DOS FILTROS ---
-            mask = pd.Series([True] * len(df_resumo))
-            if filtro_escola != "Todas": mask &= (df_resumo['Escola'] == filtro_escola)
-            if filtro_supervisor != "Todos": mask &= (df_resumo['Supervisor'] == filtro_supervisor)
-            
-            if filtro_situacao != "Todas":
-                agg = df_resumo.groupby('Escola').agg({'Edital': 'sum', 'Real': 'sum', 'Status_Codigo': list}).reset_index()
-                agg['Saldo'] = agg['Real'] - agg['Edital']
-                condicoes_agg = [
-                    agg['Saldo'] > 0, agg['Saldo'] < 0,
-                    (agg['Saldo'] == 0) & (agg['Status_Codigo'].apply(lambda x: any(s != 'OK' for s in x)))
-                ]
-                agg['Status_Calculado'] = np.select(condicoes_agg, ["🔵 EXCEDENTE", "🔴 FALTA", "🟡 AJUSTE"], default="🟢 OK")
-                escolas_alvo = agg[agg['Status_Calculado'] == filtro_situacao]['Escola']
-                mask &= df_resumo['Escola'].isin(escolas_alvo)
-
-            if filtro_comb:
-                for c, s in filtro_comb.items():
-                    escolas_validas = df_resumo[(df_resumo['Cargo'] == c) & (df_resumo['Status_Codigo'] == s)]['Escola']
-                    mask &= df_resumo['Escola'].isin(escolas_validas)
-
-            if termo_busca:
-                match = df_pessoas[df_pessoas['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas['ID'].astype(str).str.contains(termo_busca, na=False)]['Escola'].unique()
-                mask &= df_resumo['Escola'].isin(match)
-
-            df_final = df_resumo[mask]
-            
-            # --- PREPARAÇÃO DA TABELA LISTA ---
-            if not df_final.empty:
-                df_view = df_final.copy()
-                df_view = df_view.rename(columns={'Diferenca_Display': 'Diferenca', 'Status_Display': 'Status'})
+            # --- AÇÃO AO CLICAR ---
+            if len(event.selection.rows) > 0:
+                idx = event.selection.rows[0]
+                # Pega o nome da escola da linha selecionada no dataframe exibido
+                # (Importante: o índice do selection corresponde ao dataframe ordenado/filtrado exibido)
+                escola_sel = df_show.iloc[idx]['Escola']
                 
-                cols_num = ['Edital', 'Real']
-                df_view[cols_num] = df_view[cols_num].apply(pd.to_numeric, errors='coerce').fillna(0).astype(int)
-                df_view = df_view.sort_values('Escola')
-
-                # Tabela Resumo (Stats) para a Lista Principal
-                df_stats = df_view.groupby('Escola').agg({
-                    'Edital': 'sum', 'Real': 'sum',
-                    'Status_Codigo': lambda x: any(s != 'OK' for s in x),
-                    'UnidadeID': 'first', 'Supervisor': 'first', 'DataConferencia': 'first'
-                })
-
-                df_stats['Saldo'] = df_stats['Real'] - df_stats['Edital']
-                condicoes_icone = [
-                    df_stats['Saldo'] > 0, df_stats['Saldo'] < 0,
-                    (df_stats['Saldo'] == 0) & (df_stats['Status_Codigo'])
-                ]
-                df_stats['Icone'] = np.select(condicoes_icone, ["🔵", "🔴", "🟡"], default="✅")
-                df_stats['Cor'] = np.where(df_stats['Saldo'] < 0, 'red', np.where(df_stats['Saldo'] > 0, 'blue', 'green'))
-                df_stats['Sinal'] = np.where(df_stats['Saldo'] > 0, '+', '')
-
-                # -------------------------------------------------------------
-                # RENDERIZAÇÃO DA TABELA DE SELEÇÃO
-                # -------------------------------------------------------------
-                st.info(f"**Encontradas {len(df_stats)} escolas.** Clique na linha para ver detalhes.")
+                # Busca dados originais na df_lista (usando a escola como chave para segurança)
+                row_stats = df_lista[df_lista['Escola'] == escola_sel].iloc[0]
                 
-                # Prepara dataframe para exibição (reset index para ter Escola como coluna)
-                df_lista_show = df_stats.reset_index()[['Icone', 'Escola', 'Supervisor', 'Edital', 'Real', 'Saldo']]
+                # Filtra detalhes
+                df_cargos_sel = df_resumo[df_resumo['Escola'] == escola_sel]
+                df_pessoas_sel = df_pessoas[df_pessoas['Escola'] == escola_sel]
                 
-                event = st.dataframe(
-                    df_lista_show,
-                    use_container_width=True,
-                    hide_index=True,
-                    selection_mode="single-row",
-                    on_select="rerun",
-                    column_config={
-                        "Icone": st.column_config.TextColumn("St", width="small"),
-                        "Escola": st.column_config.TextColumn("Unidade Escolar", width="large"),
-                        "Saldo": st.column_config.NumberColumn("Saldo", format="%d")
-                    }
-                )
+                if f_txt:
+                    df_pessoas_sel = df_pessoas_sel[df_pessoas_sel['Funcionario'].str.contains(f_txt, case=False, na=False) | 
+                                                  df_pessoas_sel['ID'].astype(str).str.contains(f_txt, na=False)]
 
-                # -------------------------------------------------------------
-                # AÇÃO DE CLIQUE -> ABRIR MODAL
-                # -------------------------------------------------------------
-                if len(event.selection.rows) > 0:
-                    idx_selecionado = event.selection.rows[0]
-                    nome_escola_sel = df_lista_show.iloc[idx_selecionado]['Escola']
-                    
-                    # Recupera dados detalhados para o modal
-                    stats_row = df_stats.loc[nome_escola_sel]
-                    df_cargos_sel = df_view[df_view['Escola'] == nome_escola_sel]
-                    
-                    df_pessoas_sel = df_pessoas[df_pessoas['Escola'] == nome_escola_sel]
-                    if termo_busca: # Reaplica filtro de busca de pessoas se houver
-                        df_pessoas_sel = df_pessoas_sel[df_pessoas_sel['Funcionario'].str.contains(termo_busca, case=False, na=False) | df_pessoas_sel['ID'].astype(str).str.contains(termo_busca, na=False)]
-
-                    # Abre o Dialog
-                    detalhar_escola(nome_escola_sel, stats_row, df_cargos_sel, df_pessoas_sel, conn, df_unidades, df_cargos)
-
-            else:
-                st.warning("Nenhuma escola encontrada com os filtros atuais.")
-
-        except Exception as e:
-            st.error(f"Erro no sistema: {e}")
+                modal_detalhe_escola(escola_sel, row_stats, df_cargos_sel, df_pessoas_sel, conn, df_unidades_list, df_cargos_list)
+        else:
+            st.warning("Nenhuma escola encontrada.")
 
 if __name__ == "__main__":
     main()
