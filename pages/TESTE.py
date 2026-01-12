@@ -107,12 +107,12 @@ def buscar_dados_operacionais(_conn):
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
 
-    # Lógica de Status (Texto Puro para usar nos selects)
+    # Lógica de Status (Texto Puro)
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     df_resumo['Status_Codigo'] = np.select(condicoes, ['FALTA', 'EXCEDENTE'], default='OK')
     
-    # Emojis para o Status Detalhado (Dentro do Modal)
-    df_resumo['Status_Display'] = np.select(condicoes, ['🚨 FALTA', '📈 EXCEDENTE'], default='✨ OK')
+    # Emojis VISUAIS (Bolinhas)
+    df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
     
     df_resumo['Diferenca_Display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
     df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
@@ -278,26 +278,26 @@ def main():
             st.markdown("---")
             st.subheader("🏫 Gestão de Escolas")
 
-            # --- FILTROS (REORDENADOS: Tipo -> Escola -> Supervisor) ---
+            # --- FILTROS ---
             c1, c2, c3, c4, c5 = st.columns([1, 1.5, 1.2, 1, 1])
             
-            # 1. Filtro TIPO (Emoji 🏫)
+            # 1. Filtro TIPO (Escola)
             with c1: f_tipo = st.selectbox("🏫 Tipo:", ["Todos"] + sorted(list(df_resumo['Tipo'].unique())))
             
-            # 2. Filtro ESCOLA (Filtra baseado no Tipo se selecionado)
+            # 2. Filtro ESCOLA
             df_escolas_view = df_resumo[df_resumo['Tipo'] == f_tipo] if f_tipo != "Todos" else df_resumo
             with c2: f_esc = st.selectbox("🔍 Escola:", ["Todas"] + sorted(list(df_escolas_view['Escola'].unique())))
             
             # 3. Filtro SUPERVISOR
             with c3: f_sup = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
             
-            # 4. Filtro SITUAÇÃO (Com 🟡 AJUSTE incluso)
-            with c4: f_sts = st.selectbox("🚦 Situação:", ["Todas", "🚨 FALTA", "📈 EXCEDENTE", "🟡 AJUSTE", "✨ OK"])
+            # 4. Filtro SITUAÇÃO (BOLINHAS)
+            with c4: f_sts = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
             
-            # 5. Busca Textual
+            # 5. Busca
             with c5: f_txt = st.text_input("👤 Buscar Pessoa:", "")
 
-            # --- FILTROS AVANÇADOS (Expander) ---
+            # --- FILTROS AVANÇADOS ---
             with st.expander("🔎 Filtros Avançados por Cargo"):
                 cols = st.columns(5)
                 filtro_comb = {}
@@ -319,15 +319,22 @@ def main():
                 agg['Saldo'] = agg['Real'] - agg['Edital']
                 
                 conds = [
-                    agg['Saldo'] < 0, # Falta geral
-                    agg['Saldo'] > 0, # Excedente geral
-                    (agg['Saldo'] == 0) & (agg['Status_Codigo'].apply(lambda x: 'OK' not in x or any(s != 'OK' for s in x))) # Ajuste interno
+                    agg['Saldo'] < 0, # Falta
+                    agg['Saldo'] > 0, # Excedente
+                    (agg['Saldo'] == 0) & (agg['Status_Codigo'].apply(lambda x: 'OK' not in x or any(s != 'OK' for s in x))) # Ajuste
                 ]
-                # Mapeamento para os filtros do Selectbox
-                agg['Sts_Calc'] = np.select(conds, ["🚨 FALTA", "📈 EXCEDENTE", "🟡 AJUSTE"], default="✨ OK")
                 
-                # Filtragem exata
-                escolas_validas = agg[agg['Sts_Calc'] == f_sts]['Escola']
+                # Mapeamento BOLINHAS
+                agg['Sts_Calc'] = np.select(conds, ["🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE"], default="🟢 OK")
+                
+                # Filtra compatíveis (FALTA traz vermelho e amarelo)
+                alvos = []
+                if f_sts == "🔴 FALTA": alvos = ["🔴 FALTA", "🟡 AJUSTE"]
+                elif f_sts == "🔵 EXCEDENTE": alvos = ["🔵 EXCEDENTE"]
+                elif f_sts == "🟡 AJUSTE": alvos = ["🟡 AJUSTE"]
+                elif f_sts == "🟢 OK": alvos = ["🟢 OK"]
+                
+                escolas_validas = agg[agg['Sts_Calc'].isin(alvos)]['Escola']
                 mask &= df_resumo['Escola'].isin(escolas_validas)
 
             if filtro_comb:
@@ -356,16 +363,15 @@ def main():
                     'Status_Codigo': lambda x: list(x)
                 }).reset_index()
                 
-                # Ícones da Lista
+                # Lógica de Ícones (BOLINHAS)
                 df_lista['Saldo'] = df_lista['Real'] - df_lista['Edital']
                 
                 def get_icone(row):
                     s = row['Saldo']
-                    if s < 0: return "🚨" 
-                    if s > 0: return "📈" 
-                    # Lógica do Amarelo (Saldo 0 mas cargos desajustados)
+                    if s < 0: return "🔴" 
+                    if s > 0: return "🔵" 
                     if 'FALTA' in row['Status_Codigo']: return "🟡" 
-                    return "✨" 
+                    return "🟢" 
 
                 df_lista['Status'] = df_lista.apply(get_icone, axis=1)
                 
@@ -373,8 +379,8 @@ def main():
                 df_lista['Cor'] = np.where(df_lista['Saldo'] < 0, '#e74c3c', np.where(df_lista['Saldo'] > 0, '#3498db', '#27ae60'))
                 df_lista['Sinal'] = np.where(df_lista['Saldo'] > 0, '+', '')
                 
-                # Ordenação (Críticos no topo)
-                df_lista['rank'] = df_lista['Status'].map({"🚨": 0, "🟡": 1, "📈": 2, "✨": 3})
+                # Ordenação (Críticos no topo: Vermelho, Amarelo, Azul, Verde)
+                df_lista['rank'] = df_lista['Status'].map({"🔴": 0, "🟡": 1, "🔵": 2, "🟢": 3})
                 df_lista = df_lista.sort_values(['rank', 'Escola'])
 
                 st.info(f"**{len(df_lista)} Unidades Encontradas.**")
@@ -392,7 +398,7 @@ def main():
                     selection_mode="single-row",
                     on_select="rerun",
                     column_config={
-                        "Status": st.column_config.TextColumn("Status", width="small", help="🚨 Crítico | 📈 Excedente | 🟡 Ajuste | ✨ Ok"),
+                        "Status": st.column_config.TextColumn("Status", width="small", help="🔴 Falta | 🔵 Excedente | 🟡 Ajuste | 🟢 Ok"),
                         "Saldo": st.column_config.NumberColumn("Saldo", format="%+d")
                     }
                 )
