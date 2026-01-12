@@ -10,11 +10,12 @@ from sqlalchemy import text
 # CONFIGURAÇÕES INICIAIS
 # ==============================================================================
 def configurar_pagina():
-    st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="🏫")
+    st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
     st.markdown("""
     <style>
         .block-container { padding-top: 1rem; }
         [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
+        
         /* Centralizar textos nas tabelas */
         .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
             justify-content: center !important;
@@ -278,7 +279,7 @@ def main():
             st.markdown("---")
             st.subheader("🏫 Gestão de Escolas")
 
-            # --- FILTROS ---
+            # --- FILTROS (TIPO PRIMEIRO) ---
             c1, c2, c3, c4, c5 = st.columns([1, 1.5, 1.2, 1, 1])
             
             # 1. Filtro TIPO (Escola)
@@ -291,7 +292,7 @@ def main():
             # 3. Filtro SUPERVISOR
             with c3: f_sup = st.selectbox("👔 Supervisor:", ["Todos"] + sorted(list(df_resumo['Supervisor'].unique())))
             
-            # 4. Filtro SITUAÇÃO (BOLINHAS)
+            # 4. Filtro SITUAÇÃO (BOLINHAS + AJUSTE)
             with c4: f_sts = st.selectbox("🚦 Situação:", ["Todas", "🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE", "🟢 OK"])
             
             # 5. Busca
@@ -327,7 +328,7 @@ def main():
                 # Mapeamento BOLINHAS
                 agg['Sts_Calc'] = np.select(conds, ["🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE"], default="🟢 OK")
                 
-                # Filtra compatíveis (FALTA traz vermelho e amarelo)
+                # Filtra compatíveis
                 alvos = []
                 if f_sts == "🔴 FALTA": alvos = ["🔴 FALTA", "🟡 AJUSTE"]
                 elif f_sts == "🔵 EXCEDENTE": alvos = ["🔵 EXCEDENTE"]
