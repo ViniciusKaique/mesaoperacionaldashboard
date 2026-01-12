@@ -33,7 +33,7 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. BANCO DE DADOS
+# 3. BANCO DE DADOS (MESA + CONAE INTEGRAÇÃO)
 # ==============================================================================
 @st.cache_data(ttl=600)
 def fetch_dados_auxiliares_db():
@@ -63,6 +63,40 @@ def fetch_dados_auxiliares_db():
     except Exception as e:
         st.error(f"Erro DB: {e}")
         return pd.DataFrame(), {}
+
+def fetch_dados_conae_local(nome_escola):
+    """
+    Busca o comparativo Edital vs Real específico para a escola selecionada.
+    Mesma lógica do CONAE.py, filtrada pela unidade.
+    """
+    try:
+        conn = st.connection("postgres", type="sql")
+        
+        query = """
+        WITH ContagemReal AS (
+            SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
+            FROM "Colaboradores"
+            WHERE "Ativo" = TRUE
+            GROUP BY "UnidadeID", "CargoID"
+        )
+        SELECT 
+            c."NomeCargo" AS "Cargo", 
+            q."Quantidade" AS "Edital",
+            COALESCE(cr."QtdReal", 0) AS "Real",
+            (COALESCE(cr."QtdReal", 0) - q."Quantidade") AS "Saldo"
+        FROM "QuadroEdital" q
+        JOIN "Unidades" u ON q."UnidadeID" = u."UnidadeID"
+        JOIN "Cargos" c ON q."CargoID" = c."CargoID"
+        LEFT JOIN ContagemReal cr ON q."UnidadeID" = cr."UnidadeID" AND q."CargoID" = cr."CargoID"
+        WHERE u."NomeUnidade" = :escola
+        ORDER BY c."NomeCargo";
+        """
+        # ttl=0 garante dados frescos
+        df = conn.query(query, params={"escola": nome_escola}, ttl=0)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao buscar dados do CONAE: {e}")
+        return pd.DataFrame()
 
 # ==============================================================================
 # 4. API REQUISITION
@@ -482,15 +516,20 @@ if df is not None and not df.empty:
             }
         )
 
-        # --- Popup Detalhe ---
+        # --- Popup Detalhe (ATUALIZADO COM DADOS CONAE) ---
         @st.dialog("Detalhe da Escola", width="large")
         def mostrar_detalhe(escola, supervisor, df_local, diag):
             st.subheader(f"🏫 {escola}")
             st.caption(f"Supervisor: {supervisor} | Status: {diag}")
             
+            # === ABA 1: DADOS OPERACIONAIS (MESA) ===
+            st.markdown("##### 📉 Mesa Operacional (Hoje)")
+            
             mapa_ordem = {'🔴 Falta': 0, '🟢 Presente': 1, '⏳ A Iniciar': 2, '🟡 S/ Escala': 3}
-            df_local['ordem'] = df_local['Status_Individual'].map(mapa_ordem)
-            df_show = df_local.sort_values('ordem')
+            # Cria uma cópia para não alterar o df original da sessão
+            df_show = df_local.copy()
+            df_show['ordem'] = df_show['Status_Individual'].map(mapa_ordem)
+            df_show = df_show.sort_values('ordem')
 
             st.dataframe(
                 df_show[['Status_Individual', 'Funcionario', 'Cargo', 'Escala_Formatada', 'Ponto_Real']],
@@ -502,6 +541,43 @@ if df is not None and not df.empty:
                     "Ponto_Real": st.column_config.TextColumn("Batidas", width="medium"),
                 }
             )
+
+            st.divider()
+
+            # === ABA 2: COMPARATIVO CONAE (NOVO) ===
+            # Usamos um expander para não poluir a visualização inicial, mas permitir acesso rápido
+            with st.expander("📊 Ver Quadro Comparativo (CONAE)", expanded=False):
+                with st.spinner("Buscando dados do quadro..."):
+                    df_conae = fetch_dados_conae_local(escola)
+                
+                if not df_conae.empty:
+                    # Cálculo de Totais
+                    total_edital = df_conae['Edital'].sum()
+                    total_real = df_conae['Real'].sum()
+                    saldo_geral = total_real - total_edital
+                    
+                    # Métricas
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total Edital", total_edital)
+                    c2.metric("Total Real", total_real)
+                    c3.metric("Saldo", saldo_geral, delta_color="normal")
+                    
+                    # Estilização do Saldo na Tabela (Igual ao CONAE.py)
+                    def style_saldo(val):
+                        if val < 0: return 'color: #e74c3c; font-weight: bold;' # Vermelho
+                        if val > 0: return 'color: #3498db; font-weight: bold;' # Azul
+                        return 'color: #27ae60; font-weight: bold;' # Verde
+
+                    st.dataframe(
+                        df_conae.style.map(style_saldo, subset=['Saldo']),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "Saldo": st.column_config.NumberColumn("Saldo", format="%+d")
+                        }
+                    )
+                else:
+                    st.warning("Dados de quadro não encontrados para esta unidade.")
 
         if len(event.selection.rows) > 0:
             idx = event.selection.rows[0]
