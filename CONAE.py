@@ -330,7 +330,7 @@ def main():
                 
                 # Filtra compatíveis
                 alvos = []
-                if f_sts == "🔴 FALTA": alvos = ["🔴 FALTA", "🟡 AJUSTE"]
+                if f_sts == "🔴 FALTA": alvos = ["🔴 FALTA"]
                 elif f_sts == "🔵 EXCEDENTE": alvos = ["🔵 EXCEDENTE"]
                 elif f_sts == "🟡 AJUSTE": alvos = ["🟡 AJUSTE"]
                 elif f_sts == "🟢 OK": alvos = ["🟢 OK"]
