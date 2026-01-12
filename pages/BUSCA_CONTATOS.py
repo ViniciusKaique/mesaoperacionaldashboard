@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
-import pytz # Biblioteca de fuso horário
+import pytz
 from datetime import datetime
 from PIL import Image
 from sqlalchemy import text
@@ -45,7 +45,6 @@ def init_db_token():
     conn = st.connection("postgres", type="sql")
     try:
         with conn.session as session:
-            # Criação da tabela (Aspas duplas no nome para garantir Case Sensitive)
             session.execute(text("""
                 CREATE TABLE IF NOT EXISTS public."HCMTokens" (
                     id VARCHAR(50) PRIMARY KEY,
@@ -62,7 +61,6 @@ def init_db_token():
 def get_token_db(conn):
     """Busca o token salvo no banco"""
     try:
-        # Aspas duplas "HCMTokens" são OBRIGATÓRIAS se a tabela foi criada com maiúsculas
         query = 'SELECT access_token, user_uid, updated_at FROM public."HCMTokens" WHERE id = \'bot_hcm_contact\''
         df = conn.query(query, ttl=0)
         
@@ -71,18 +69,13 @@ def get_token_db(conn):
             uid = df.iloc[0]['user_uid']
             data_salva = df.iloc[0]['updated_at']
             return token, uid, data_salva
-            
     except Exception as e:
-        # Mostra o erro para sabermos por que falhou a busca no banco
-        st.warning(f"⚠️ Erro ao ler do banco (Ignorando cache): {e}")
         pass
-        
     return None, None, None
 
-def save_token_db(conn, token, uid):
-    """Salva ou atualiza o token no banco com horário do Brasil"""
+def save_token_db(conn, token, uid_interno):
+    """Salva o token no banco com horário do Brasil"""
     agora_br = get_data_brasil()
-    
     try:
         with conn.session as session:
             query = text("""
@@ -93,8 +86,7 @@ def save_token_db(conn, token, uid):
                     user_uid = EXCLUDED.user_uid,
                     updated_at = EXCLUDED.updated_at;
             """)
-            # Passamos a data do Python (:hora) em vez de usar NOW() do banco
-            session.execute(query, {"token": token, "uid": uid, "hora": agora_br})
+            session.execute(query, {"token": token, "uid": uid_interno, "hora": agora_br})
             session.commit()
     except Exception as e:
         st.error(f"Erro ao salvar token no banco: {e}")
@@ -112,8 +104,21 @@ def get_headers_base():
         "Referer": "https://hcm.teknisa.com/login/"
     }
 
+def get_headers_request(token):
+    """Gera headers autenticados usando o ID do navegador (não o do banco)"""
+    h = get_headers_base()
+    h.update({
+        "OAuth-Token": token,
+        "OAuth-Hash": HCM_HASH,
+        "OAuth-KeepConnected": "Yes",
+        "OAuth-Project": HCM_PROJECT,
+        "User-Id": HCM_UID_BROWSER, # IMPORTANTE: Usa o ID do browser (secrets), não o ID numérico do banco
+        "Referer": "https://hcm.teknisa.com//"
+    })
+    return h
+
 def login_teknisa_novo():
-    """Realiza o login real na API e retorna Token + UID"""
+    """Realiza o login real na API"""
     url_login = "https://hcm.teknisa.com/backend_login/index.php/login"
     headers = get_headers_base()
     headers["User-Id"] = HCM_UID_BROWSER
@@ -150,77 +155,63 @@ def login_teknisa_novo():
         
     return None, None
 
-def validar_token(token, uid):
-    """Testa se o token atual ainda funciona"""
-    headers = get_headers_base()
-    headers.update({
-        "OAuth-Token": token,
-        "OAuth-Hash": HCM_HASH,
-        "OAuth-Project": HCM_PROJECT,
-        "User-Id": str(uid)
-    })
+def validar_token(token):
+    """
+    Testa se o token funciona usando uma busca vazia no endpoint getPessoa.
+    Retorna (True/False, Mensagem de Debug)
+    """
+    headers = get_headers_request(token)
+    
+    # Payload de teste: busca alguém que não existe
+    payload_teste = {
+        "disableLoader": True,
+        "filter": [{"name": "NMPESSOA", "value": "%_TESTE_TOKEN_VALIDATION_%", "operator": "LIKE_I"}],
+        "page": 1, "itemsPerPage": 1, "requestType": "FilterData"
+    }
     
     try:
-        # Faz uma requisição leve para testar a validade
-        r = requests.post(
-            "https://hcm.teknisa.com/backend/index.php/getEmpresa", 
-            headers=headers, 
-            json={"filter": [], "page": 1, "itemsPerPage": 1, "requestType": "FilterData"},
-            timeout=10 
-        )
-        return r.status_code == 200 and "dataset" in r.json()
-    except:
-        return False
+        # Usamos getPessoa pois sabemos que o usuário tem permissão nele
+        r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=payload_teste, timeout=10)
+        
+        if r.status_code == 200:
+            # Se deu 200, o token é válido (mesmo que não ache ninguém)
+            return True, f"Status 200 OK (Teste com getPessoa)"
+        elif r.status_code in [401, 403]:
+            return False, f"Token Expirado (Status {r.status_code})"
+        else:
+            # Outros erros (500, etc) vamos considerar inválido por segurança
+            return False, f"Erro inesperado ({r.status_code})"
+            
+    except Exception as e:
+        return False, f"Erro de conexão no teste: {str(e)}"
 
 def obter_sessao_valida():
-    """
-    Lógica de Prioridade:
-    1. Banco de Dados
-    2. Login Novo (apenas se BD falhar ou token inválido)
-    """
     conn = init_db_token()
     
-    # 1. TENTA BANCO PRIMEIRO
-    token_db, uid_db, data_token = get_token_db(conn)
+    # 1. TENTA BANCO
+    token_db, uid_interno_db, data_token = get_token_db(conn)
     
     if token_db:
-        # Formata a data para exibir no log (apenas visual)
-        try:
-            data_fmt = pd.to_datetime(data_token).strftime('%d/%m %H:%M')
-        except: 
-            data_fmt = "?"
-
-        st.caption(f"🔎 Token encontrado no BD (Gerado em: {data_fmt}). Testando validade...")
+        data_fmt = pd.to_datetime(data_token).strftime('%d/%m %H:%M') if data_token else "?"
+        st.caption(f"🔎 Analisando token do banco (Gerado: {data_fmt})...")
         
-        if validar_token(token_db, uid_db):
-            st.toast("Token do banco VÁLIDO! Usando cache.", icon="⚡")
-            return token_db, uid_db, "Banco de Dados"
+        is_valid, msg_debug = validar_token(token_db)
+        
+        if is_valid:
+            st.caption(f"✅ Token VÁLIDO! ({msg_debug}). Usando cache.")
+            return token_db, "Banco de Dados"
         else:
-            st.caption("⚠️ Token do banco EXPIRADO. Gerando novo...")
-    else:
-        st.caption("ℹ️ Nenhum token no banco ou erro na leitura.")
+            st.caption(f"⚠️ Token INVÁLIDO ou EXPIRADO. Motivo: {msg_debug}")
+            st.caption("🔄 Iniciando renovação automática...")
 
-    # 2. SE FALHOU ACIMA, GERA UM NOVO
-    st.caption("🔄 Conectando API Login...")
-    token_new, uid_new = login_teknisa_novo()
+    # 2. LOGIN NOVO
+    token_new, uid_interno_new = login_teknisa_novo()
     
     if token_new:
-        save_token_db(conn, token_new, uid_new)
-        return token_new, uid_new, "Nova Autenticação"
+        save_token_db(conn, token_new, uid_interno_new)
+        return token_new, "Nova Autenticação"
         
-    return None, None, "Falha Crítica"
-
-def get_headers_request(token, uid):
-    h = get_headers_base()
-    h.update({
-        "OAuth-Token": token,
-        "OAuth-Hash": HCM_HASH,
-        "OAuth-KeepConnected": "Yes",
-        "OAuth-Project": HCM_PROJECT,
-        "User-Id": str(uid),
-        "Referer": "https://hcm.teknisa.com//"
-    })
-    return h
+    return None, "Falha Crítica"
 
 def formatar_data(data_str):
     if data_str and isinstance(data_str, str): return data_str.split(' ')[0]
@@ -249,19 +240,19 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
     else:
         lista_nomes = [n.strip() for n in nomes_input.split('\n') if n.strip()]
         
-        # --- AUTENTICAÇÃO INTELIGENTE ---
+        # --- AUTENTICAÇÃO ---
         with st.status("🔐 Verificando autenticação...", expanded=True) as status:
-            token, uid, origem_auth = obter_sessao_valida()
+            token, origem_auth = obter_sessao_valida()
             
             if not token:
-                status.update(label="❌ Falha crítica de login. Verifique as credenciais.", state="error")
+                status.update(label="❌ Falha crítica de login.", state="error")
                 st.stop()
             
-            label_auth = "Cache DB (Rápido) ⚡" if origem_auth == "Banco de Dados" else "Login Realizado 🔄"
+            label_auth = "Cache DB ⚡" if origem_auth == "Banco de Dados" else "Renovado 🔄"
             status.update(label=f"✅ Autenticado! {label_auth}", state="complete", expanded=False)
 
-        # --- LOOP DE BUSCA ---
-        headers = get_headers_request(token, uid)
+        # --- BUSCA ---
+        headers = get_headers_request(token)
         relatorio = []
         
         col_prog, col_txt = st.columns([3, 1])
@@ -286,14 +277,12 @@ if st.button("🚀 Iniciar Busca", use_container_width=True):
                     "page": 1, "itemsPerPage": 50, "requestType": "FilterData"
                 }
                 
-                # Retry simples
                 try:
                     r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=pl_pessoa, timeout=10)
                 except:
                     time.sleep(1) 
                     r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=pl_pessoa, timeout=10)
 
-                # Tratamento para JSON inválido
                 try: resp_json = r.json()
                 except: resp_json = {}
                 
