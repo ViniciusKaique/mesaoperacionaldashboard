@@ -5,6 +5,7 @@ import urllib.parse
 from datetime import datetime, time, date
 from PIL import Image
 from sqlalchemy import text
+import io
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -33,27 +34,26 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. BANCO DE DADOS (MESA + CONAE INTEGRAÇÃO)
+# 3. BANCO DE DADOS (CONSULTAS)
 # ==============================================================================
 @st.cache_data(ttl=600)
 def fetch_dados_auxiliares_db():
     try:
         conn = st.connection("postgres", type="sql")
         
-        # 1. Relação Escola -> Supervisor (Fallback)
+        # 1. Relação Escola -> Supervisor
         q_unidades = """
-        SELECT u."UnidadeID", s."NomeSupervisor" as "Supervisor"
+        SELECT u."UnidadeID", s."NomeSupervisor" as "Supervisor", u."NomeUnidade"
         FROM "Unidades" u
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         """
         df_unidades = conn.query(q_unidades)
         df_unidades['UnidadeID'] = pd.to_numeric(df_unidades['UnidadeID'], errors='coerce').fillna(0).astype(int)
         
-        # 2. Relação Supervisor -> Celular (DICIONÁRIO INFALÍVEL)
+        # 2. Relação Supervisor -> Celular
         q_telefones = 'SELECT "NomeSupervisor", "Celular" FROM "Supervisores"'
         df_telefones = conn.query(q_telefones)
         
-        # Cria dicionário { 'CLAYTON': '119...', ... }
         map_telefones = dict(zip(
             df_telefones['NomeSupervisor'].str.strip().str.upper(), 
             df_telefones['Celular']
@@ -65,13 +65,10 @@ def fetch_dados_auxiliares_db():
         return pd.DataFrame(), {}
 
 def fetch_dados_conae_local(unidade_id):
-    """
-    Busca o comparativo Edital vs Real E A LISTA NOMINAL com ID usando o ID da unidade.
-    """
+    """Busca comparativo unitário (usado no detalhe da escola)"""
     try:
         conn = st.connection("postgres", type="sql")
         
-        # Query 1: Resumo Numérico
         q_resumo = """
         WITH ContagemReal AS (
             SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -92,7 +89,6 @@ def fetch_dados_conae_local(unidade_id):
         ORDER BY c."NomeCargo";
         """
         
-        # Query 2: Lista Nominal (AGORA COM ColaboradorID PARA CRUZAMENTO)
         q_pessoas = """
         SELECT c."NomeCargo" as "Cargo", col."Nome" as "Funcionario", col."ColaboradorID" as "ID"
         FROM "Colaboradores" col
@@ -104,7 +100,6 @@ def fetch_dados_conae_local(unidade_id):
         df_resumo = conn.query(q_resumo, params={"uid": int(unidade_id)}, ttl=0)
         df_pessoas = conn.query(q_pessoas, params={"uid": int(unidade_id)}, ttl=0)
         
-        # Garante que o ID do banco seja inteiro para comparação
         if not df_pessoas.empty:
             df_pessoas['ID'] = pd.to_numeric(df_pessoas['ID'], errors='coerce').fillna(0).astype(int)
 
@@ -112,14 +107,41 @@ def fetch_dados_conae_local(unidade_id):
     except Exception as e:
         return pd.DataFrame(), pd.DataFrame()
 
+@st.cache_data(ttl=300)
+def fetch_censo_completo_conae():
+    """
+    Busca TODOS os funcionários ativos de TODAS as escolas para diagnóstico global.
+    """
+    try:
+        conn = st.connection("postgres", type="sql")
+        query = """
+        SELECT 
+            u."NomeUnidade" as "Escola_DB",
+            s."NomeSupervisor" as "Supervisor_DB",
+            c."NomeCargo" as "Cargo", 
+            col."Nome" as "Funcionario", 
+            col."ColaboradorID" as "ID",
+            col."UnidadeID"
+        FROM "Colaboradores" col
+        JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
+        JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+        JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
+        WHERE col."Ativo" = TRUE
+        """
+        df = conn.query(query, ttl=0)
+        df['ID'] = pd.to_numeric(df['ID'], errors='coerce').fillna(0).astype(int)
+        df['UnidadeID'] = pd.to_numeric(df['UnidadeID'], errors='coerce').fillna(0).astype(int)
+        return df
+    except Exception as e:
+        st.error(f"Erro ao buscar censo completo: {e}")
+        return pd.DataFrame()
+
 # ==============================================================================
 # 4. API REQUISITION
 # ==============================================================================
 def fetch_mesa_operacional(data_selecionada):
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
-    
     data_str = data_selecionada.strftime("%d/%m/%Y")
-    
     params = {
         "requestType": "FilterData",
         "DIA": data_str,
@@ -127,7 +149,6 @@ def fetch_mesa_operacional(data_selecionada):
         "NRORG": NR_ORG,
         "CDOPERADOR": CD_OPERADOR
     }
-    
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -135,7 +156,6 @@ def fetch_mesa_operacional(data_selecionada):
         "OAuth-Cdoperador": CD_OPERADOR,
         "OAuth-Nrorg": NR_ORG
     }
-
     try:
         r = requests.get(url, params=params, headers=headers, timeout=30)
         if r.status_code == 200:
@@ -144,11 +164,10 @@ def fetch_mesa_operacional(data_selecionada):
                 return pd.DataFrame(data["dataset"]["data"])
     except Exception as e:
         st.error(f"Erro API: {e}")
-    
     return pd.DataFrame()
 
 # ==============================================================================
-# 5. PROCESSAMENTO INTELIGENTE
+# 5. PROCESSAMENTO E LÓGICA
 # ==============================================================================
 def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise):
     if df_api.empty: return df_api
@@ -158,32 +177,34 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     
     if df_api.empty: return df_api
 
-    # 1. Ajuste de Tipos
+    # Ajuste IDs e Tipos
     df_api['UnidadeID'] = pd.to_numeric(df_api['NRESTRUTGEREN'], errors='coerce').fillna(0).astype(int)
     
-    # 2. Merge com Unidades (para garantir nome do supervisor se faltar na API)
+    # Merge com Unidades
     df_merged = pd.merge(df_api, df_unidades, on="UnidadeID", how="left")
+    
+    # Fallback de nome de escola se a API não trouxe ou para garantir o nome interno
+    if 'NomeUnidade' in df_merged.columns:
+        df_merged['Escola_Interna'] = df_merged['NomeUnidade']
+    
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
-
-    # 3. Injeção do Celular via Dicionário
     df_merged['Supervisor_Key'] = df_merged['Supervisor'].str.strip().str.upper()
     df_merged['Celular'] = df_merged['Supervisor_Key'].map(map_telefones)
 
-    # 4. Renomear e GARANTIR O ID (NRVINCULOM)
     df_merged = df_merged.rename(columns={
-        'NMESTRUTGEREN': 'Escola', 
+        'NMESTRUTGEREN': 'Escola_API', 
         'NMVINCULOM': 'Funcionario',
-        'NRVINCULOM': 'ID',  # <--- ID DA MESA (CORRESPONDE AO ColaboradorID)
+        'NRVINCULOM': 'ID', 
         'NMOCUPACAOH': 'Cargo',
         'horas_trabalhadas': 'Batidas',
         'horas_escala': 'Escala',
         'OBSERVACAO': 'Obs'
     })
 
-    # Garante que o ID da Mesa seja inteiro para cruzar com o Banco
     df_merged['ID'] = pd.to_numeric(df_merged['ID'], errors='coerce').fillna(0).astype(int)
+    df_merged['Escola'] = df_merged['Escola_API'] # Usa o nome da API por padrão na visualização
 
-    # Lógica de Horário
+    # Horários e Status
     hoje = date.today()
     agora = datetime.now().time()
     eh_hoje = (data_analise == hoje)
@@ -200,12 +221,8 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     def get_status(row):
         batidas = row.get('Batidas')
         escala = row.get('Escala')
-        
-        # Tem batida? Presente
         tem_batida = isinstance(batidas, list) and len(batidas) > 0
         if tem_batida: return '🟢 Presente'
-
-        # Não tem batida, analisa escala
         tem_escala = isinstance(escala, list) and len(escala) > 0
         if tem_escala:
             if eh_passado: return '🔴 Falta'
@@ -216,7 +233,6 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
                     else: return '⏳ A Iniciar'
                 else: return '🔴 Falta'
             return '⏳ A Iniciar'
-                
         return '🟡 S/ Escala'
 
     df_merged['Status_Individual'] = df_merged.apply(get_status, axis=1)
@@ -232,96 +248,101 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE WHATSAPP
+# 6. DIAGNÓSTICO GLOBAL
 # ==============================================================================
-def gerar_link_whatsapp(telefone, mensagem):
-    texto_encoded = urllib.parse.quote_plus(mensagem)
-    fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
-    return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
-
-@st.dialog("📢 Central de Alertas", width="large")
-def dialog_disparar_alertas(df_completo):
-    st.caption("Envie mensagens para os supervisores. Prioriza escolas com problema de registro.")
+@st.dialog("📊 Diagnóstico Global de Divergências", width="large")
+def modal_diagnostico_global(df_mesa):
+    st.caption("Comparação completa entre Funcionários na API (Mesa) e Funcionários Ativos no Banco de Dados.")
     
-    # 1. Filtra apenas as linhas com FALTA
-    df_faltas_bruto = df_completo[df_completo['Status_Individual'] == '🔴 Falta']
+    with st.spinner("Baixando censo completo do banco..."):
+        df_banco = fetch_censo_completo_conae()
     
-    if df_faltas_bruto.empty:
-        st.success("🎉 Nenhuma falta registrada para alerta no momento!")
+    if df_banco.empty:
+        st.error("Não foi possível carregar os dados do banco.")
+        return
+    
+    if df_mesa is None or df_mesa.empty:
+        st.error("Não há dados da Mesa Operacional carregados.")
         return
 
-    supervisores_com_falta = sorted(df_faltas_bruto['Supervisor'].unique())
+    # --- PROCESSAMENTO DAS DIVERGÊNCIAS ---
+    divergencias = []
+
+    # 1. Agrupar Mesa por Escola (ID) para comparação eficiente
+    # Criamos um set de IDs presentes na mesa
+    ids_mesa_ativos = set(df_mesa[df_mesa['ID'] > 0]['ID'].unique())
     
-    for supervisor in supervisores_com_falta:
-        with st.container(border=True):
-            c1, c2 = st.columns([3, 1])
-            
-            df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
-            df_sup_total = df_completo[df_completo['Supervisor'] == supervisor]
-            
-            escolas_list = []
-            
-            for escola, dados_falta in df_sup_faltas.groupby('Escola'):
-                tem_presenca = not df_sup_total[
-                    (df_sup_total['Escola'] == escola) & 
-                    (df_sup_total['Status_Individual'] == '🟢 Presente')
-                ].empty
-                
-                eh_problema_app = not tem_presenca
-                lista_nomes = dados_falta['Funcionario'].tolist()
-                
-                escolas_list.append({
-                    'nome': escola,
-                    'funcionarios': lista_nomes,
-                    'problema_app': eh_problema_app,
-                    'qtd': len(lista_nomes)
-                })
-            
-            escolas_list.sort(key=lambda x: x['problema_app'], reverse=True)
-            
-            total_faltas = sum(e['qtd'] for e in escolas_list)
-            total_escolas_problema = sum(1 for e in escolas_list if e['problema_app'])
-            
-            msg_lines = [f"Ola *{supervisor}*, resumo de ausencias ({datetime.now().strftime('%H:%M')}):"]
-            msg_lines.append("")
-            msg_lines.append(f"\U0001F4CA *Total Faltas:* {total_faltas}")
-            if total_escolas_problema > 0:
-                msg_lines.append(f"\u26A0\uFE0F *Escolas c/ Problema App:* {total_escolas_problema}")
-            msg_lines.append("")
-            
-            for item in escolas_list:
-                nomes_str = ", ".join(item['funcionarios'])
-                if item['problema_app']:
-                    cabecalho = f"\U0001F6A8 *{item['nome']}* (\u26A0\uFE0F POSSIVEL PROBLEMA SMARTPHONE)"
-                else:
-                    cabecalho = f"\U0001F3EB *{item['nome']}*"
-                msg_lines.append(f"{cabecalho}")
-                msg_lines.append(f"\U0001F6AB {nomes_str}")
-                msg_lines.append("")
-            
-            msg_final = "\n".join(msg_lines).strip()
-            
-            telefone_bruto = None
-            if 'Celular' in df_sup_faltas.columns:
-                val = df_sup_faltas['Celular'].iloc[0]
-                if pd.notna(val) and str(val).strip() != "" and str(val).strip().lower() != "none":
-                    telefone_bruto = val
-            
-            with c1:
-                st.markdown(f"**👤 {supervisor}**")
-                kpi1, kpi2 = st.columns(2)
-                kpi1.metric("Faltas", total_faltas)
-                kpi2.metric("Escolas Críticas", total_escolas_problema)
-                with st.expander("Ver mensagem gerada"):
-                    st.text(msg_final)
-            
-            with c2:
-                if telefone_bruto:
-                    link = gerar_link_whatsapp(telefone_bruto, msg_final)
-                    st.link_button("📲 Enviar WhatsApp", link, use_container_width=True)
-                else:
-                    st.warning("Sem Celular")
-                    st.caption("Cadastre no Banco")
+    # 2. Agrupar Banco
+    ids_banco_ativos = set(df_banco[df_banco['ID'] > 0]['ID'].unique())
+
+    # --- CASO A: NO BANCO MAS NÃO NA MESA ---
+    # Colaboradores ativos no DB que não apareceram na lista da API hoje
+    diff_banco_mesa = list(ids_banco_ativos - ids_mesa_ativos)
+    
+    if diff_banco_mesa:
+        # Filtra os detalhes desses IDs no dataframe do banco
+        df_missing_mesa = df_banco[df_banco['ID'].isin(diff_banco_mesa)].copy()
+        df_missing_mesa['Tipo_Divergencia'] = "⚠️ No Banco, Fora da Mesa"
+        df_missing_mesa = df_missing_mesa[['Escola_DB', 'Supervisor_DB', 'Tipo_Divergencia', 'ID', 'Funcionario', 'Cargo']]
+        # Renomear para padronizar
+        df_missing_mesa.columns = ['Escola', 'Supervisor', 'Divergencia', 'Matricula', 'Funcionario', 'Cargo']
+        divergencias.append(df_missing_mesa)
+
+    # --- CASO B: NA MESA MAS NÃO NO BANCO ---
+    # Colaboradores que estão na escala da API mas não constam como ativos no DB
+    diff_mesa_banco = list(ids_mesa_ativos - ids_banco_ativos)
+    
+    if diff_mesa_banco:
+        df_missing_banco = df_mesa[df_mesa['ID'].isin(diff_mesa_banco)].copy()
+        df_missing_banco['Tipo_Divergencia'] = "🚫 Na Mesa, Sem Cadastro Ativo"
+        # Tenta pegar nome da escola, priorizando o da API
+        df_missing_banco = df_missing_banco[['Escola', 'Supervisor', 'Tipo_Divergencia', 'ID', 'Funcionario', 'Cargo']]
+        df_missing_banco.columns = ['Escola', 'Supervisor', 'Divergencia', 'Matricula', 'Funcionario', 'Cargo']
+        divergencias.append(df_missing_banco)
+
+    # --- CONSOLIDAÇÃO ---
+    if divergencias:
+        df_final = pd.concat(divergencias, ignore_index=True)
+        # Ordenar
+        df_final = df_final.sort_values(by=['Divergencia', 'Escola', 'Funcionario'])
+        
+        # Métricas
+        qtd_banco_fora = len(df_final[df_final['Divergencia'].str.contains("No Banco")])
+        qtd_mesa_fora = len(df_final[df_final['Divergencia'].str.contains("Na Mesa")])
+        
+        c1, c2 = st.columns(2)
+        c1.metric("Faltando na Mesa (Erro Integração?)", qtd_banco_fora, delta_color="inverse")
+        c2.metric("Sobrando na Mesa (Inativo/Sem Cadastro?)", qtd_mesa_fora, delta_color="inverse")
+        
+        st.markdown("---")
+        
+        # Filtros no Modal
+        f_sup = st.selectbox("Filtrar Supervisor (Relatório):", ["Todos"] + sorted(df_final['Supervisor'].unique()))
+        if f_sup != "Todos":
+            df_final = df_final[df_final['Supervisor'] == f_sup]
+
+        st.dataframe(
+            df_final,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Matricula": st.column_config.NumberColumn("Matrícula", format="%d")
+            }
+        )
+        
+        # Botão Exportar
+        csv = df_final.to_csv(index=False, sep=';', encoding='utf-8-sig')
+        st.download_button(
+            label="📥 Baixar Relatório Completo (CSV)",
+            data=csv,
+            file_name=f"diagnostico_divergencias_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+    else:
+        st.success("🎉 Incrível! Nenhuma divergência encontrada entre Mesa e Banco de Dados.")
+
 
 # ==============================================================================
 # 7. UI - SIDEBAR
@@ -349,6 +370,13 @@ if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
+st.sidebar.divider()
+
+# --- NOVO BOTÃO DE DIAGNÓSTICO ---
+if st.session_state.get('mesa_dados') is not None:
+    if st.sidebar.button("🏥 Diagnóstico Geral", use_container_width=True):
+        modal_diagnostico_global(st.session_state['mesa_dados'])
+
 # ==============================================================================
 # 8. CARREGAMENTO DOS DADOS
 # ==============================================================================
@@ -369,6 +397,12 @@ data_exibicao = st.session_state['mesa_data_ref'].strftime("%d/%m/%Y")
 # ==============================================================================
 st.title("📉 Monitoramento de Faltas")
 st.caption(f"Dados referentes a: **{data_exibicao}**")
+
+# FUNCIONALIDADE WHATSAPP (HELPER)
+def gerar_link_whatsapp(telefone, mensagem):
+    texto_encoded = urllib.parse.quote_plus(mensagem)
+    fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
+    return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
 
 if df is not None and not df.empty:
     st.markdown("---")
@@ -491,7 +525,6 @@ if df is not None and not df.empty:
             }
         )
 
-        # --- Popup Detalhe (ATUALIZADO PARA COMPARAR IDs) ---
         @st.dialog("Detalhe da Escola", width="large")
         def mostrar_detalhe(escola, supervisor, df_local, diag):
             st.subheader(f"🏫 {escola}")
@@ -549,23 +582,16 @@ if df is not None and not df.empty:
                         column_config={"Saldo": st.column_config.NumberColumn("Saldo", format="%+d")}
                     )
 
-                    # --- ANÁLISE DE DIVERGÊNCIAS (VIA ID/MATRÍCULA) ---
                     if not df_pessoas_conae.empty:
                         st.markdown("---")
                         st.markdown("###### 🔍 Divergências (Cruzamento por Matrícula/ID)")
                         
-                        # Set dos IDs
                         set_mesa = set(df_local['ID'].unique())
-                        # Remove 0 se existir
                         set_mesa.discard(0) 
-                        
                         set_banco = set(df_pessoas_conae['ID'].unique())
                         set_banco.discard(0)
 
-                        # Diferença 1: No Banco (Ativo) mas NÃO na Mesa
                         ids_fora_mesa = sorted(list(set_banco - set_mesa))
-                        
-                        # Diferença 2: Na Mesa (Escala) mas NÃO no Banco
                         ids_sem_cadastro = sorted(list(set_mesa - set_banco))
 
                         c_div1, c_div2 = st.columns(2)
