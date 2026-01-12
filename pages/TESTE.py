@@ -379,7 +379,7 @@ def main():
                 df_lista['Cor'] = np.where(df_lista['Saldo'] < 0, '#e74c3c', np.where(df_lista['Saldo'] > 0, '#3498db', '#27ae60'))
                 df_lista['Sinal'] = np.where(df_lista['Saldo'] > 0, '+', '')
                 
-                # Ordenação (Críticos no topo: Vermelho, Amarelo, Azul, Verde)
+                # Ordenação
                 df_lista['rank'] = df_lista['Status'].map({"🔴": 0, "🟡": 1, "🔵": 2, "🟢": 3})
                 df_lista = df_lista.sort_values(['rank', 'Escola'])
 
@@ -398,7 +398,8 @@ def main():
                     selection_mode="single-row",
                     on_select="rerun",
                     column_config={
-                        "Status": st.column_config.TextColumn("Status", width="small", help="🔴 Falta | 🔵 Excedente | 🟡 Ajuste | 🟢 Ok"),
+                        # AQUI ESTÁ O AJUSTE SOLICITADO
+                        "Status": st.column_config.TextColumn("🚦", width="small", help="🔴 Falta | 🔵 Excedente | 🟡 Ajuste | 🟢 Ok"),
                         "Saldo": st.column_config.NumberColumn("Saldo", format="%+d")
                     }
                 )
