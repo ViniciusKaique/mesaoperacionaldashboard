@@ -66,13 +66,14 @@ def fetch_dados_auxiliares_db():
 
 def fetch_dados_conae_local(unidade_id):
     """
-    Busca o comparativo Edital vs Real usando o ID da unidade (UnidadeID).
-    Isso resolve o problema de divergência de nomes entre 'PortalGestor' e 'NomeUnidade'.
+    Busca o comparativo Edital vs Real E A LISTA NOMINAL usando o ID da unidade.
+    Retorna dois DataFrames: (Resumo, Pessoas).
     """
     try:
         conn = st.connection("postgres", type="sql")
         
-        query = """
+        # Query 1: Resumo Numérico (Edital vs Real)
+        q_resumo = """
         WITH ContagemReal AS (
             SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
             FROM "Colaboradores"
@@ -91,12 +92,23 @@ def fetch_dados_conae_local(unidade_id):
         WHERE q."UnidadeID" = :uid
         ORDER BY c."NomeCargo";
         """
-        # ttl=0 garante dados frescos
-        df = conn.query(query, params={"uid": int(unidade_id)}, ttl=0)
-        return df
+        
+        # Query 2: Lista Nominal (Quem são as pessoas)
+        q_pessoas = """
+        SELECT c."NomeCargo" as "Cargo", col."Nome" as "Funcionario"
+        FROM "Colaboradores" col
+        JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+        WHERE col."UnidadeID" = :uid AND col."Ativo" = TRUE
+        ORDER BY c."NomeCargo", col."Nome"
+        """
+
+        df_resumo = conn.query(q_resumo, params={"uid": int(unidade_id)}, ttl=0)
+        df_pessoas = conn.query(q_pessoas, params={"uid": int(unidade_id)}, ttl=0)
+        
+        return df_resumo, df_pessoas
     except Exception as e:
-        # Se der erro (ex: ID não existe no CONAE), retorna vazio silenciosamente
-        return pd.DataFrame()
+        # Se der erro, retorna vazio
+        return pd.DataFrame(), pd.DataFrame()
 
 # ==============================================================================
 # 4. API REQUISITION
@@ -516,7 +528,7 @@ if df is not None and not df.empty:
             }
         )
 
-        # --- Popup Detalhe (ATUALIZADO COM DADOS CONAE via ID) ---
+        # --- Popup Detalhe (ATUALIZADO COM DADOS CONAE via ID + NOMES) ---
         @st.dialog("Detalhe da Escola", width="large")
         def mostrar_detalhe(escola, supervisor, df_local, diag):
             st.subheader(f"🏫 {escola}")
@@ -548,15 +560,15 @@ if df is not None and not df.empty:
             with st.expander("📊 Ver Quadro Comparativo (CONAE)", expanded=False):
                 with st.spinner("Buscando dados do quadro..."):
                     # CORREÇÃO: Usamos o UnidadeID da primeira linha do dataframe local
-                    # Como df_local é filtrado por escola, todas as linhas têm o mesmo ID.
+                    df_conae = pd.DataFrame()
+                    df_pessoas_conae = pd.DataFrame()
+                    
                     try:
                         if not df_local.empty:
                             uid_target = int(df_local['UnidadeID'].iloc[0])
-                            df_conae = fetch_dados_conae_local(uid_target)
-                        else:
-                             df_conae = pd.DataFrame()
+                            df_conae, df_pessoas_conae = fetch_dados_conae_local(uid_target)
                     except:
-                        df_conae = pd.DataFrame()
+                        pass
                 
                 if not df_conae.empty:
                     # Cálculo de Totais
@@ -570,7 +582,7 @@ if df is not None and not df.empty:
                     c2.metric("Total Real", total_real)
                     c3.metric("Saldo", saldo_geral, delta_color="normal")
                     
-                    # Estilização do Saldo na Tabela (Igual ao CONAE.py)
+                    # Estilização do Saldo na Tabela
                     def style_saldo(val):
                         if val < 0: return 'color: #e74c3c; font-weight: bold;' # Vermelho
                         if val > 0: return 'color: #3498db; font-weight: bold;' # Azul
@@ -584,6 +596,17 @@ if df is not None and not df.empty:
                             "Saldo": st.column_config.NumberColumn("Saldo", format="%+d")
                         }
                     )
+                    
+                    # LISTA NOMINAL (NOVIDADE AQUI)
+                    if not df_pessoas_conae.empty:
+                        st.markdown("---")
+                        st.markdown("###### 📋 Lista Nominal (Cadastrados Ativos)")
+                        st.dataframe(
+                            df_pessoas_conae,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+
                 else:
                     st.warning("Dados de quadro não encontrados para esta unidade.")
 
