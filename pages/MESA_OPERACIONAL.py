@@ -66,13 +66,12 @@ def fetch_dados_auxiliares_db():
 
 def fetch_dados_conae_local(unidade_id):
     """
-    Busca o comparativo Edital vs Real E A LISTA NOMINAL usando o ID da unidade.
-    Retorna dois DataFrames: (Resumo, Pessoas).
+    Busca o comparativo Edital vs Real E A LISTA NOMINAL com ID usando o ID da unidade.
     """
     try:
         conn = st.connection("postgres", type="sql")
         
-        # Query 1: Resumo Numérico (Edital vs Real)
+        # Query 1: Resumo Numérico
         q_resumo = """
         WITH ContagemReal AS (
             SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -93,9 +92,9 @@ def fetch_dados_conae_local(unidade_id):
         ORDER BY c."NomeCargo";
         """
         
-        # Query 2: Lista Nominal (Quem são as pessoas)
+        # Query 2: Lista Nominal (AGORA COM ColaboradorID PARA CRUZAMENTO)
         q_pessoas = """
-        SELECT c."NomeCargo" as "Cargo", col."Nome" as "Funcionario"
+        SELECT c."NomeCargo" as "Cargo", col."Nome" as "Funcionario", col."ColaboradorID" as "ID"
         FROM "Colaboradores" col
         JOIN "Cargos" c ON col."CargoID" = c."CargoID"
         WHERE col."UnidadeID" = :uid AND col."Ativo" = TRUE
@@ -105,9 +104,12 @@ def fetch_dados_conae_local(unidade_id):
         df_resumo = conn.query(q_resumo, params={"uid": int(unidade_id)}, ttl=0)
         df_pessoas = conn.query(q_pessoas, params={"uid": int(unidade_id)}, ttl=0)
         
+        # Garante que o ID do banco seja inteiro para comparação
+        if not df_pessoas.empty:
+            df_pessoas['ID'] = pd.to_numeric(df_pessoas['ID'], errors='coerce').fillna(0).astype(int)
+
         return df_resumo, df_pessoas
     except Exception as e:
-        # Se der erro, retorna vazio
         return pd.DataFrame(), pd.DataFrame()
 
 # ==============================================================================
@@ -163,19 +165,23 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     df_merged = pd.merge(df_api, df_unidades, on="UnidadeID", how="left")
     df_merged['Supervisor'] = df_merged['Supervisor'].fillna("Não Identificado")
 
-    # 3. Injeção do Celular via Dicionário (Mais seguro que join)
+    # 3. Injeção do Celular via Dicionário
     df_merged['Supervisor_Key'] = df_merged['Supervisor'].str.strip().str.upper()
     df_merged['Celular'] = df_merged['Supervisor_Key'].map(map_telefones)
 
-    # 4. Renomear
+    # 4. Renomear e GARANTIR O ID (NRVINCULOM)
     df_merged = df_merged.rename(columns={
         'NMESTRUTGEREN': 'Escola', 
         'NMVINCULOM': 'Funcionario',
+        'NRVINCULOM': 'ID',  # <--- ID DA MESA (CORRESPONDE AO ColaboradorID)
         'NMOCUPACAOH': 'Cargo',
         'horas_trabalhadas': 'Batidas',
         'horas_escala': 'Escala',
         'OBSERVACAO': 'Obs'
     })
+
+    # Garante que o ID da Mesa seja inteiro para cruzar com o Banco
+    df_merged['ID'] = pd.to_numeric(df_merged['ID'], errors='coerce').fillna(0).astype(int)
 
     # Lógica de Horário
     hoje = date.today()
@@ -206,9 +212,9 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
             if eh_hoje:
                 hora_inicio = extrair_hora_inicio(escala)
                 if hora_inicio:
-                    if agora >= hora_inicio: return '🔴 Falta' # Atrasado = Falta até chegar
+                    if agora >= hora_inicio: return '🔴 Falta'
                     else: return '⏳ A Iniciar'
-                else: return '🔴 Falta' # Escala quebrada
+                else: return '🔴 Falta'
             return '⏳ A Iniciar'
                 
         return '🟡 S/ Escala'
@@ -226,13 +232,11 @@ def processar_dados_unificados(df_api, df_unidades, map_telefones, data_analise)
     return df_merged
 
 # ==============================================================================
-# 6. FUNCIONALIDADE WHATSAPP (UNICODE + LINK SEGURO)
+# 6. FUNCIONALIDADE WHATSAPP
 # ==============================================================================
 def gerar_link_whatsapp(telefone, mensagem):
-    # 'quote_plus' é mais seguro para espaços e caracteres especiais em URLs do que 'quote'
     texto_encoded = urllib.parse.quote_plus(mensagem)
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
-    # Usando api.whatsapp.com que lida melhor com redirects e encoding
     return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
 
 @st.dialog("📢 Central de Alertas", width="large")
@@ -252,24 +256,18 @@ def dialog_disparar_alertas(df_completo):
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             
-            # Dados deste supervisor
             df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
             df_sup_total = df_completo[df_completo['Supervisor'] == supervisor]
             
-            # --- PREPARAÇÃO DOS DADOS (PARA ORDENAÇÃO) ---
             escolas_list = []
             
-            # Itera sobre cada escola que tem falta para classificar
             for escola, dados_falta in df_sup_faltas.groupby('Escola'):
-                # Verifica se TEM ALGUMA PRESENÇA na escola (no dataframe total)
                 tem_presenca = not df_sup_total[
                     (df_sup_total['Escola'] == escola) & 
                     (df_sup_total['Status_Individual'] == '🟢 Presente')
                 ].empty
                 
                 eh_problema_app = not tem_presenca
-                
-                # Lista de nomes faltantes
                 lista_nomes = dados_falta['Funcionario'].tolist()
                 
                 escolas_list.append({
@@ -279,47 +277,30 @@ def dialog_disparar_alertas(df_completo):
                     'qtd': len(lista_nomes)
                 })
             
-            # --- ORDENAÇÃO ---
-            # Escolas com problema (True) aparecem primeiro
             escolas_list.sort(key=lambda x: x['problema_app'], reverse=True)
             
-            # --- CÁLCULO DOS TOTALIZADORES ---
             total_faltas = sum(e['qtd'] for e in escolas_list)
             total_escolas_problema = sum(1 for e in escolas_list if e['problema_app'])
             
-            # --- MONTAGEM DA MENSAGEM (USANDO UNICODE) ---
-            # \U0001F4CA = 📊
-            # \u26A0\uFE0F = ⚠️
-            # \U0001F6A8 = 🚨
-            # \U0001F3EB = 🏫
-            # \U0001F6AB = 🚫
-            
             msg_lines = [f"Ola *{supervisor}*, resumo de ausencias ({datetime.now().strftime('%H:%M')}):"]
-            
-            msg_lines.append("") # <--- LINHA EM BRANCO ADICIONADA AQUI
-            
-            # Adiciona Totalizadores no Cabeçalho
+            msg_lines.append("")
             msg_lines.append(f"\U0001F4CA *Total Faltas:* {total_faltas}")
             if total_escolas_problema > 0:
                 msg_lines.append(f"\u26A0\uFE0F *Escolas c/ Problema App:* {total_escolas_problema}")
-            
-            msg_lines.append("") # Linha em branco
+            msg_lines.append("")
             
             for item in escolas_list:
                 nomes_str = ", ".join(item['funcionarios'])
-                
                 if item['problema_app']:
                     cabecalho = f"\U0001F6A8 *{item['nome']}* (\u26A0\uFE0F POSSIVEL PROBLEMA SMARTPHONE)"
                 else:
                     cabecalho = f"\U0001F3EB *{item['nome']}*"
-                
                 msg_lines.append(f"{cabecalho}")
                 msg_lines.append(f"\U0001F6AB {nomes_str}")
-                msg_lines.append("") # Espaço
+                msg_lines.append("")
             
             msg_final = "\n".join(msg_lines).strip()
             
-            # --- UI: EXIBIÇÃO NO STREAMLIT ---
             telefone_bruto = None
             if 'Celular' in df_sup_faltas.columns:
                 val = df_sup_faltas['Celular'].iloc[0]
@@ -328,11 +309,9 @@ def dialog_disparar_alertas(df_completo):
             
             with c1:
                 st.markdown(f"**👤 {supervisor}**")
-                # Mostra os contadores visuais para o operador também
                 kpi1, kpi2 = st.columns(2)
                 kpi1.metric("Faltas", total_faltas)
                 kpi2.metric("Escolas Críticas", total_escolas_problema)
-                
                 with st.expander("Ver mensagem gerada"):
                     st.text(msg_final)
             
@@ -362,18 +341,16 @@ if "name" in st.session_state:
 st.sidebar.markdown("### 📅 Configuração")
 data_selecionada = st.sidebar.date_input("Data de Análise", datetime.now())
 
-# Limpa cache se mudar data
 if st.session_state['mesa_data_ref'] != data_selecionada:
     st.session_state['mesa_dados'] = None 
 
-# --- BOTÃO DE ATUALIZAR ---
 if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
     st.session_state['mesa_dados'] = None
     st.cache_data.clear()
     st.rerun()
 
 # ==============================================================================
-# 8. CARREGAMENTO DOS DADOS (ANTES DA INTERFACE PRINCIPAL)
+# 8. CARREGAMENTO DOS DADOS
 # ==============================================================================
 if st.session_state['mesa_dados'] is None:
     with st.spinner(f"Buscando dados de {data_selecionada.strftime('%d/%m/%Y')}..."):
@@ -393,7 +370,6 @@ data_exibicao = st.session_state['mesa_data_ref'].strftime("%d/%m/%Y")
 st.title("📉 Monitoramento de Faltas")
 st.caption(f"Dados referentes a: **{data_exibicao}**")
 
-# --- BOTÃO DE DISPARO EM DESTAQUE ---
 if df is not None and not df.empty:
     st.markdown("---")
     c_btn1, c_btn2 = st.columns([3, 1])
@@ -403,18 +379,15 @@ if df is not None and not df.empty:
         if st.button("📢 Disparar Alertas", use_container_width=True):
             dialog_disparar_alertas(df)
     st.markdown("---")
-# -----------------------------------------------------
 
 # === FILTROS NA SIDEBAR ===
 filtro_supervisor = "Todos"
 filtro_status = "TODAS"
 
 if df is not None and not df.empty:
-    # Filtro 1: Supervisor
     opcoes = ["Todos"] + sorted(df['Supervisor'].unique().tolist())
     filtro_supervisor = st.sidebar.selectbox("Filtrar por Supervisor:", opcoes)
     
-    # Filtro 2: Status/Diagnóstico (NOVO)
     st.sidebar.markdown("---")
     opcoes_status = ["TODAS", "🌟 ESCOLA COMPLETA", "⚠️ POSSÍVEL PROBLEMA SMARTPHONE"]
     filtro_status = st.sidebar.selectbox("Filtrar por Situação:", opcoes_status)
@@ -422,7 +395,6 @@ if df is not None and not df.empty:
 if df is not None and not df.empty:
     df_filtrado = df.copy()
     
-    # Aplica filtro de Supervisor
     if filtro_supervisor != "Todos":
         df_filtrado = df_filtrado[df_filtrado['Supervisor'] == filtro_supervisor]
 
@@ -430,7 +402,6 @@ if df is not None and not df.empty:
         st.warning("Nenhum dado encontrado para o filtro selecionado.")
         st.stop()
 
-    # --- KPIs (Baseados no Supervisor Selecionado) ---
     qtd_presente = len(df_filtrado[df_filtrado['Status_Individual'] == '🟢 Presente'])
     qtd_falta = len(df_filtrado[df_filtrado['Status_Individual'] == '🔴 Falta'])
     qtd_a_entrar = len(df_filtrado[df_filtrado['Status_Individual'] == '⏳ A Iniciar'])
@@ -444,7 +415,6 @@ if df is not None and not df.empty:
     
     st.divider()
 
-    # --- Tabela Agrupada ---
     resumo = df_filtrado.groupby(['Escola', 'Supervisor']).agg(
         Efetivo=('Status_Individual', 'count'), 
         Faltas=('Status_Individual', lambda x: (x == '🔴 Falta').sum()),
@@ -452,7 +422,6 @@ if df is not None and not df.empty:
         A_Entrar=('Status_Individual', lambda x: (x == '⏳ A Iniciar').sum())
     ).reset_index()
 
-    # --- Diagnóstico ---
     def definir_diagnostico(row):
         presentes = row['Presentes']
         faltas = row['Faltas']
@@ -475,15 +444,11 @@ if df is not None and not df.empty:
 
     resumo['Diagnostico'] = resumo.apply(definir_diagnostico, axis=1)
 
-    # === APLICAÇÃO DO FILTRO DE STATUS (NOVO) ===
-    # Filtra o RESUMO baseado no diagnóstico calculado acima
     if filtro_status == "🌟 ESCOLA COMPLETA":
         resumo = resumo[resumo['Diagnostico'].str.contains("COMPLETA", na=False)]
     elif filtro_status == "⚠️ POSSÍVEL PROBLEMA SMARTPHONE":
         resumo = resumo[resumo['Diagnostico'].str.contains("PROBLEMA", na=False)]
-    # Se for TODAS, não faz nada
 
-    # Ordenação
     def get_sort_key(row):
         d = row['Diagnostico']
         if "PROBLEMA" in d: return 0
@@ -496,7 +461,6 @@ if df is not None and not df.empty:
         resumo['perc_presenca'] = resumo['Presentes'] / (resumo['Efetivo'].replace(0, 1))
         resumo = resumo.sort_values(by=['sort_group', 'perc_presenca'], ascending=[True, True])
 
-    # --- KPIs Diagnóstico ---
     qtd_problema = len(resumo[resumo['Diagnostico'].str.contains("PROBLEMA", na=False)])
     qtd_completas = len(resumo[resumo['Diagnostico'].str.contains("COMPLETA", na=False)])
     
@@ -506,7 +470,6 @@ if df is not None and not df.empty:
     with c_info2:
         if qtd_completas > 0: st.success(f"🌟 **{qtd_completas}** escolas com efetivo 100% completo.")
 
-    # --- Tabela Visual ---
     st.markdown(f"### 🏫 Visão por Unidade ({filtro_supervisor})")
     
     if resumo.empty:
@@ -528,27 +491,25 @@ if df is not None and not df.empty:
             }
         )
 
-        # --- Popup Detalhe (ATUALIZADO COM DADOS CONAE via ID + NOMES) ---
+        # --- Popup Detalhe (ATUALIZADO PARA COMPARAR IDs) ---
         @st.dialog("Detalhe da Escola", width="large")
         def mostrar_detalhe(escola, supervisor, df_local, diag):
             st.subheader(f"🏫 {escola}")
             st.caption(f"Supervisor: {supervisor} | Status: {diag}")
             
-            # === ABA 1: DADOS OPERACIONAIS (MESA) ===
             st.markdown("##### 📉 Mesa Operacional (Hoje)")
-            
             mapa_ordem = {'🔴 Falta': 0, '🟢 Presente': 1, '⏳ A Iniciar': 2, '🟡 S/ Escala': 3}
-            # Cria uma cópia para não alterar o df original da sessão
             df_show = df_local.copy()
             df_show['ordem'] = df_show['Status_Individual'].map(mapa_ordem)
             df_show = df_show.sort_values('ordem')
 
             st.dataframe(
-                df_show[['Status_Individual', 'Funcionario', 'Cargo', 'Escala_Formatada', 'Ponto_Real']],
+                df_show[['Status_Individual', 'Funcionario', 'Cargo', 'ID', 'Escala_Formatada', 'Ponto_Real']],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "Status_Individual": st.column_config.TextColumn("Situação", width="small"),
+                    "ID": st.column_config.NumberColumn("Matrícula", format="%d"),
                     "Escala_Formatada": st.column_config.TextColumn("Escala Prevista", width="medium"),
                     "Ponto_Real": st.column_config.TextColumn("Batidas", width="medium"),
                 }
@@ -556,63 +517,90 @@ if df is not None and not df.empty:
 
             st.divider()
 
-            # === ABA 2: COMPARATIVO CONAE (CORRIGIDO) ===
             with st.expander("📊 Ver Quadro Comparativo (CONAE)", expanded=False):
                 with st.spinner("Buscando dados do quadro..."):
-                    # CORREÇÃO: Usamos o UnidadeID da primeira linha do dataframe local
                     df_conae = pd.DataFrame()
                     df_pessoas_conae = pd.DataFrame()
-                    
                     try:
                         if not df_local.empty:
                             uid_target = int(df_local['UnidadeID'].iloc[0])
                             df_conae, df_pessoas_conae = fetch_dados_conae_local(uid_target)
-                    except:
-                        pass
+                    except: pass
                 
                 if not df_conae.empty:
-                    # Cálculo de Totais
                     total_edital = df_conae['Edital'].sum()
                     total_real = df_conae['Real'].sum()
                     saldo_geral = total_real - total_edital
                     
-                    # Métricas
                     c1, c2, c3 = st.columns(3)
                     c1.metric("Total Edital", total_edital)
                     c2.metric("Total Real", total_real)
                     c3.metric("Saldo", saldo_geral, delta_color="normal")
                     
-                    # Estilização do Saldo na Tabela
                     def style_saldo(val):
-                        if val < 0: return 'color: #e74c3c; font-weight: bold;' # Vermelho
-                        if val > 0: return 'color: #3498db; font-weight: bold;' # Azul
-                        return 'color: #27ae60; font-weight: bold;' # Verde
+                        if val < 0: return 'color: #e74c3c; font-weight: bold;'
+                        if val > 0: return 'color: #3498db; font-weight: bold;'
+                        return 'color: #27ae60; font-weight: bold;'
 
                     st.dataframe(
                         df_conae.style.map(style_saldo, subset=['Saldo']),
                         use_container_width=True,
                         hide_index=True,
-                        column_config={
-                            "Saldo": st.column_config.NumberColumn("Saldo", format="%+d")
-                        }
+                        column_config={"Saldo": st.column_config.NumberColumn("Saldo", format="%+d")}
                     )
-                    
-                    # LISTA NOMINAL (NOVIDADE AQUI)
+
+                    # --- ANÁLISE DE DIVERGÊNCIAS (VIA ID/MATRÍCULA) ---
                     if not df_pessoas_conae.empty:
                         st.markdown("---")
-                        st.markdown("###### 📋 Lista Nominal (Cadastrados Ativos)")
+                        st.markdown("###### 🔍 Divergências (Cruzamento por Matrícula/ID)")
+                        
+                        # Set dos IDs
+                        set_mesa = set(df_local['ID'].unique())
+                        # Remove 0 se existir
+                        set_mesa.discard(0) 
+                        
+                        set_banco = set(df_pessoas_conae['ID'].unique())
+                        set_banco.discard(0)
+
+                        # Diferença 1: No Banco (Ativo) mas NÃO na Mesa
+                        ids_fora_mesa = sorted(list(set_banco - set_mesa))
+                        
+                        # Diferença 2: Na Mesa (Escala) mas NÃO no Banco
+                        ids_sem_cadastro = sorted(list(set_mesa - set_banco))
+
+                        c_div1, c_div2 = st.columns(2)
+                        
+                        with c_div1:
+                            if ids_fora_mesa:
+                                st.warning(f"⚠️ {len(ids_fora_mesa)} No Banco, mas fora da Mesa")
+                                df_miss = df_pessoas_conae[df_pessoas_conae['ID'].isin(ids_fora_mesa)]
+                                st.dataframe(df_miss, hide_index=True, use_container_width=True,
+                                    column_config={"ID": st.column_config.NumberColumn("Matrícula", format="%d")})
+                            else:
+                                st.success("✅ Todos do Banco estão na Mesa")
+
+                        with c_div2:
+                            if ids_sem_cadastro:
+                                st.error(f"🚫 {len(ids_sem_cadastro)} Na Mesa, mas Inativos/Sem Cadastro")
+                                df_extra = df_local[df_local['ID'].isin(ids_sem_cadastro)]
+                                st.dataframe(df_extra[['ID', 'Funcionario', 'Cargo']], hide_index=True, use_container_width=True,
+                                    column_config={"ID": st.column_config.NumberColumn("Matrícula", format="%d")})
+                            else:
+                                st.success("✅ Ninguém sobrando na Mesa")
+                        
+                        st.markdown("---")
+                        st.markdown("###### 📋 Lista Nominal Completa (Banco de Dados)")
                         st.dataframe(
                             df_pessoas_conae,
                             use_container_width=True,
-                            hide_index=True
+                            hide_index=True,
+                            column_config={"ID": st.column_config.NumberColumn("Matrícula", format="%d")}
                         )
-
                 else:
                     st.warning("Dados de quadro não encontrados para esta unidade.")
 
         if len(event.selection.rows) > 0:
             idx = event.selection.rows[0]
-            # Ajuste de índice: precisamos pegar a linha correta do resumo filtrado
             row = resumo.iloc[idx]
             df_detalhe = df_filtrado[df_filtrado['Escola'] == row['Escola']]
             mostrar_detalhe(row['Escola'], row['Supervisor'], df_detalhe, row['Diagnostico'])
