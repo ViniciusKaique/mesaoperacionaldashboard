@@ -262,7 +262,7 @@ def modal_diagnostico_global(df_mesa):
         return
     
     if df_mesa is None or df_mesa.empty:
-        st.error("Não há dados da Mesa Operacional carregados.")
+        st.error("Não há dados da Mesa Operacional carregados. Aguarde o processamento da tela principal.")
         return
 
     # --- PROCESSAMENTO DAS DIVERGÊNCIAS ---
@@ -372,10 +372,17 @@ if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
 
 st.sidebar.divider()
 
+# VARIÁVEL DE CONTROLE DE DIALOG
+abriu_modal_diagnostico = False
+
 # --- NOVO BOTÃO DE DIAGNÓSTICO ---
-if st.session_state.get('mesa_dados') is not None:
-    if st.sidebar.button("🏥 Diagnóstico Geral", use_container_width=True):
-        modal_diagnostico_global(st.session_state['mesa_dados'])
+if st.sidebar.button("🏥 Diagnóstico Geral", use_container_width=True):
+    dados = st.session_state.get('mesa_dados')
+    if dados is not None and not dados.empty:
+        abriu_modal_diagnostico = True
+        modal_diagnostico_global(dados)
+    else:
+        st.sidebar.warning("⚠️ Carregue os dados primeiro (Aguarde o processamento da tela principal).")
 
 # ==============================================================================
 # 8. CARREGAMENTO DOS DADOS
@@ -403,6 +410,101 @@ def gerar_link_whatsapp(telefone, mensagem):
     texto_encoded = urllib.parse.quote_plus(mensagem)
     fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
     return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
+
+# --- FUNÇÃO DO POPUP DE ALERTA ---
+@st.dialog("📢 Central de Alertas", width="large")
+def dialog_disparar_alertas(df_completo):
+    st.caption("Envie mensagens para os supervisores. Prioriza escolas com problema de registro.")
+    
+    # 1. Filtra apenas as linhas com FALTA
+    df_faltas_bruto = df_completo[df_completo['Status_Individual'] == '🔴 Falta']
+    
+    if df_faltas_bruto.empty:
+        st.success("🎉 Nenhuma falta registrada para alerta no momento!")
+        return
+
+    supervisores_com_falta = sorted(df_faltas_bruto['Supervisor'].unique())
+    
+    for supervisor in supervisores_com_falta:
+        with st.container(border=True):
+            c1, c2 = st.columns([3, 1])
+            
+            # Dados deste supervisor
+            df_sup_faltas = df_faltas_bruto[df_faltas_bruto['Supervisor'] == supervisor]
+            df_sup_total = df_completo[df_completo['Supervisor'] == supervisor]
+            
+            # --- PREPARAÇÃO DOS DADOS (PARA ORDENAÇÃO) ---
+            escolas_list = []
+            
+            # Itera sobre cada escola que tem falta para classificar
+            for escola, dados_falta in df_sup_faltas.groupby('Escola'):
+                # Verifica se TEM ALGUMA PRESENÇA na escola (no dataframe total)
+                tem_presenca = not df_sup_total[
+                    (df_sup_total['Escola'] == escola) & 
+                    (df_sup_total['Status_Individual'] == '🟢 Presente')
+                ].empty
+                
+                eh_problema_app = not tem_presenca
+                
+                # Lista de nomes faltantes
+                lista_nomes = dados_falta['Funcionario'].tolist()
+                
+                escolas_list.append({
+                    'nome': escola,
+                    'funcionarios': lista_nomes,
+                    'problema_app': eh_problema_app,
+                    'qtd': len(lista_nomes)
+                })
+            
+            # --- ORDENAÇÃO ---
+            escolas_list.sort(key=lambda x: x['problema_app'], reverse=True)
+            
+            # --- CÁLCULO DOS TOTALIZADORES ---
+            total_faltas = sum(e['qtd'] for e in escolas_list)
+            total_escolas_problema = sum(1 for e in escolas_list if e['problema_app'])
+            
+            # --- MONTAGEM DA MENSAGEM ---
+            msg_lines = [f"Ola *{supervisor}*, resumo de ausencias ({datetime.now().strftime('%H:%M')}):"]
+            msg_lines.append("")
+            msg_lines.append(f"\U0001F4CA *Total Faltas:* {total_faltas}")
+            if total_escolas_problema > 0:
+                msg_lines.append(f"\u26A0\uFE0F *Escolas c/ Problema App:* {total_escolas_problema}")
+            msg_lines.append("")
+            
+            for item in escolas_list:
+                nomes_str = ", ".join(item['funcionarios'])
+                if item['problema_app']:
+                    cabecalho = f"\U0001F6A8 *{item['nome']}* (\u26A0\uFE0F POSSIVEL PROBLEMA SMARTPHONE)"
+                else:
+                    cabecalho = f"\U0001F3EB *{item['nome']}*"
+                msg_lines.append(f"{cabecalho}")
+                msg_lines.append(f"\U0001F6AB {nomes_str}")
+                msg_lines.append("")
+            
+            msg_final = "\n".join(msg_lines).strip()
+            
+            # --- UI: EXIBIÇÃO NO STREAMLIT ---
+            telefone_bruto = None
+            if 'Celular' in df_sup_faltas.columns:
+                val = df_sup_faltas['Celular'].iloc[0]
+                if pd.notna(val) and str(val).strip() != "" and str(val).strip().lower() != "none":
+                    telefone_bruto = val
+            
+            with c1:
+                st.markdown(f"**👤 {supervisor}**")
+                kpi1, kpi2 = st.columns(2)
+                kpi1.metric("Faltas", total_faltas)
+                kpi2.metric("Escolas Críticas", total_escolas_problema)
+                with st.expander("Ver mensagem gerada"):
+                    st.text(msg_final)
+            
+            with c2:
+                if telefone_bruto:
+                    link = gerar_link_whatsapp(telefone_bruto, msg_final)
+                    st.link_button("📲 Enviar WhatsApp", link, use_container_width=True)
+                else:
+                    st.warning("Sem Celular")
+                    st.caption("Cadastre no Banco")
 
 if df is not None and not df.empty:
     st.markdown("---")
@@ -625,7 +727,7 @@ if df is not None and not df.empty:
                 else:
                     st.warning("Dados de quadro não encontrados para esta unidade.")
 
-        if len(event.selection.rows) > 0:
+        if len(event.selection.rows) > 0 and not abriu_modal_diagnostico:
             idx = event.selection.rows[0]
             row = resumo.iloc[idx]
             df_detalhe = df_filtrado[df_filtrado['Escola'] == row['Escola']]
