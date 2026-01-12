@@ -2,7 +2,9 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+from datetime import datetime
 from PIL import Image
+from sqlalchemy import text
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -25,25 +27,63 @@ try:
     HCM_UID_BROWSER = SECRETS_HCM.get("user_id_browser", "lchp1n8y3ka")
     HCM_PROJECT = SECRETS_HCM.get("project_id", "750")
 except Exception as e:
-    st.error(f"⚠️ Erro de Configuração: Credenciais [hcm_api] não encontradas no secrets.toml. Erro: {e}")
+    st.error(f"⚠️ Erro de Configuração: {e}")
     st.stop()
 
 # ==============================================================================
-# 3. FUNÇÕES AUXILIARES E API
+# 3. GERENCIAMENTO DE BANCO DE DADOS (TOKEN CACHE)
 # ==============================================================================
 
-def carregar_logo():
-    try: return Image.open("logo.png")
-    except: return None
+def init_db_token():
+    """Cria a tabela HCMTokens se não existir"""
+    conn = st.connection("postgres", type="sql")
+    with conn.session as session:
+        # Usamos aspas duplas "HCMTokens" para respeitar as maiúsculas no PostgreSQL
+        session.execute(text("""
+            CREATE TABLE IF NOT EXISTS public."HCMTokens" (
+                id VARCHAR(50) PRIMARY KEY,
+                access_token TEXT,
+                user_uid TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """))
+        session.commit()
+    return conn
 
-def formatar_data(data_str):
-    """Remove o horário das datas do Teknisa (ex: 11/06/1992 00:00:00 -> 11/06/1992)"""
-    if data_str and isinstance(data_str, str):
-        return data_str.split(' ')[0]
-    return data_str
+def get_token_db(conn):
+    """Busca o token salvo no banco"""
+    try:
+        # Aspas duplas no nome da tabela para o SELECT também
+        df = conn.query('SELECT access_token, user_uid FROM public."HCMTokens" WHERE id = \'bot_hcm_contact\'', ttl=0)
+        if not df.empty:
+            return df.iloc[0]['access_token'], df.iloc[0]['user_uid']
+    except Exception:
+        pass
+    return None, None
+
+def save_token_db(conn, token, uid):
+    """Salva ou atualiza o token no banco"""
+    try:
+        with conn.session as session:
+            # Upsert na tabela correta
+            query = text("""
+                INSERT INTO public."HCMTokens" (id, access_token, user_uid, updated_at)
+                VALUES ('bot_hcm_contact', :token, :uid, NOW())
+                ON CONFLICT (id) DO UPDATE 
+                SET access_token = EXCLUDED.access_token,
+                    user_uid = EXCLUDED.user_uid,
+                    updated_at = NOW();
+            """)
+            session.execute(query, {"token": token, "uid": uid})
+            session.commit()
+    except Exception as e:
+        st.error(f"Erro ao salvar token no banco: {e}")
+
+# ==============================================================================
+# 4. FUNÇÕES DE API
+# ==============================================================================
 
 def get_headers_base():
-    """Headers comuns para evitar bloqueio"""
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Content-Type": "application/json",
@@ -52,10 +92,9 @@ def get_headers_base():
         "Referer": "https://hcm.teknisa.com/login/"
     }
 
-def autenticar_hcm_auto():
-    """Realiza o login automático e retorna o Token e o UID real"""
+def login_teknisa_novo():
+    """Realiza o login real na API e retorna Token + UID"""
     url_login = "https://hcm.teknisa.com/backend_login/index.php/login"
-    
     headers = get_headers_base()
     headers["User-Id"] = HCM_UID_BROWSER
 
@@ -75,32 +114,66 @@ def autenticar_hcm_auto():
             {"name": "NRORGOPER", "operator": "=", "value": False},
             {"name": "USE_ACCESS_TIME_CONTROL", "operator": "=", "value": True}
         ],
-        "page": 1,
-        "requestType": "FilterData",
-        "origin": {
-            "containerName": "AUTHENTICATION",
-            "widgetName": "LOGIN",
-            "containerLabel": "Autenticação",
-            "widgetLabel": "Login"
-        }
+        "page": 1, "requestType": "FilterData",
+        "origin": {"containerName": "AUTHENTICATION", "widgetName": "LOGIN"}
     }
 
     try:
-        r = requests.post(url_login, headers=headers, json=payload, timeout=15)
+        r = requests.post(url_login, headers=headers, json=payload, timeout=20)
         r.raise_for_status()
         data = r.json()
         
         if "dataset" in data and "userData" in data["dataset"]:
-            token = data["dataset"]["userData"].get("TOKEN")
-            uid_retornado = data["dataset"]["userData"].get("USER_ID", HCM_UID_BROWSER)
-            return token, uid_retornado
-        return None, None
+            return data["dataset"]["userData"].get("TOKEN"), data["dataset"]["userData"].get("USER_ID")
     except Exception as e:
-        st.error(f"Erro na conexão de login: {e}")
-        return None, None
+        st.error(f"Erro na requisição de login: {e}")
+        
+    return None, None
 
-def get_headers_autenticados(token, uid):
-    """Gera headers para as requisições de dados"""
+def validar_token(token, uid):
+    """Testa se o token atual ainda funciona fazendo uma requisição leve"""
+    headers = get_headers_base()
+    headers.update({
+        "OAuth-Token": token,
+        "OAuth-Hash": HCM_HASH,
+        "OAuth-Project": HCM_PROJECT,
+        "User-Id": str(uid)
+    })
+    # Tenta buscar as empresas (request leve) para validar sessão
+    try:
+        r = requests.post(
+            "https://hcm.teknisa.com/backend/index.php/getEmpresa", 
+            headers=headers, 
+            json={"filter": [], "page": 1, "itemsPerPage": 1, "requestType": "FilterData"},
+            timeout=5
+        )
+        # Se retornar 200 e tiver dataset, o token está vivo
+        return r.status_code == 200 and "dataset" in r.json()
+    except:
+        return False
+
+def obter_sessao_valida():
+    """Orquestrador: Banco -> Valida -> (Login se necessário) -> Salva"""
+    conn = init_db_token()
+    
+    # 1. Tenta pegar do banco
+    token_db, uid_db = get_token_db(conn)
+    
+    if token_db:
+        # 2. Se achou, valida se não expirou
+        if validar_token(token_db, uid_db):
+            return token_db, uid_db, "Cache (Banco de Dados)"
+    
+    # 3. Se não achou ou expirou, faz login novo
+    token_new, uid_new = login_teknisa_novo()
+    
+    if token_new:
+        save_token_db(conn, token_new, uid_new)
+        return token_new, uid_new, "Novo Login (API)"
+        
+    return None, None, "Falha"
+
+def get_headers_request(token, uid):
     h = get_headers_base()
     h.update({
         "OAuth-Token": token,
@@ -112,158 +185,126 @@ def get_headers_autenticados(token, uid):
     })
     return h
 
+def formatar_data(data_str):
+    if data_str and isinstance(data_str, str): return data_str.split(' ')[0]
+    return data_str
+
 # ==============================================================================
-# 4. SIDEBAR
+# 5. UI PRINCIPAL
 # ==============================================================================
+def carregar_logo():
+    try: return Image.open("logo.png")
+    except: return None
+
 with st.sidebar:
-    if logo := carregar_logo(): 
-        st.image(logo, use_container_width=True)
+    if logo := carregar_logo(): st.image(logo, use_container_width=True)
     st.divider()
-    
-    if "name" in st.session_state: 
-        st.write(f"👤 **{st.session_state['name']}**")
-        st.divider()
-    
-    st.info("ℹ️ Insira um nome por linha na caixa de texto principal.")
+    if "name" in st.session_state: st.write(f"👤 **{st.session_state['name']}**"); st.divider()
 
-# ==============================================================================
-# 5. CORPO PRINCIPAL
-# ==============================================================================
-st.title("📞 Contatos - HCM Teknisa")
-st.markdown("Busca automática de telefones e e-mails de colaboradores ativos.")
+st.title("📱Contatos - HCM")
+st.markdown("Busca inteligente com cache de sessão para máxima performance.")
 
-nomes_input = st.text_area("📋 Lista de Nomes (Um por linha):", height=200, placeholder="Ex:\nJOAO DA SILVA\nMARIA OLIVEIRA")
+nomes_input = st.text_area("📋 Lista de Nomes (Um por linha):", height=150)
 
 if st.button("🚀 Iniciar Busca", use_container_width=True):
     if not nomes_input.strip():
-        st.warning("⚠️ A lista de nomes está vazia.")
+        st.warning("Lista vazia.")
     else:
         lista_nomes = [n.strip() for n in nomes_input.split('\n') if n.strip()]
-        total = len(lista_nomes)
         
-        # --- 1. LOGIN AUTOMÁTICO ---
-        with st.status("🔐 Autenticando no sistema...", expanded=True) as status:
-            token_auth, uid_auth = autenticar_hcm_auto()
+        # --- AUTENTICAÇÃO INTELIGENTE ---
+        with st.status("🔐 Verificando autenticação...", expanded=True) as status:
+            token, uid, origem_auth = obter_sessao_valida()
             
-            if not token_auth:
-                status.update(label="❌ Falha no Login! Verifique credenciais no secrets.", state="error")
+            if not token:
+                status.update(label="❌ Falha crítica de login. Verifique as credenciais.", state="error")
                 st.stop()
             
-            status.update(label="✅ Login realizado com sucesso! Iniciando extração...", state="complete", expanded=False)
-        
-        # --- 2. EXTRAÇÃO ---
-        headers = get_headers_autenticados(token_auth, uid_auth)
+            msg_auth = "Token recuperado do Banco de Dados ⚡" if "Cache" in origem_auth else "Token renovado com sucesso 🔄"
+            status.update(label=f"✅ Autenticado! {msg_auth}", state="complete", expanded=False)
+
+        # --- LOOP DE BUSCA ---
+        headers = get_headers_request(token, uid)
         relatorio = []
         
-        col_bar, col_txt = st.columns([3, 1])
-        progress_bar = col_bar.progress(0)
-        status_text = col_txt.empty()
-        table_placeholder = st.empty()
-
+        col_prog, col_txt = st.columns([3, 1])
+        bar = col_prog.progress(0)
+        txt = col_txt.empty()
+        table_place = st.empty()
+        
+        total = len(lista_nomes)
+        
         for i, nome in enumerate(lista_nomes):
-            status_text.caption(f"Processando: {i+1}/{total}")
+            txt.caption(f"Processando {i+1}/{total}...")
+            
             try:
-                # A. Busca Pessoa
-                payload_p = {
+                # 1. Buscar Pessoa
+                pl_pessoa = {
                     "disableLoader": False,
                     "filter": [
-                        # Filtro de data genérico para pegar ativos recentes ou histórico
-                        {"name": "P_DTMESCOMPETENC", "operator": "=", "value": "01/12/2025"}, 
+                        {"name": "P_DTMESCOMPETENC", "operator": "=", "value": "01/12/2025"},
                         {"name": "P_NRORG", "operator": "=", "value": "3260"},
                         {"name": "NMPESSOA", "value": f"%{nome}%", "operator": "LIKE_I", "isCustomFilter": True}
                     ],
                     "page": 1, "itemsPerPage": 50, "requestType": "FilterData"
                 }
-
-                r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=payload_p, timeout=10)
                 
-                pessoas = []
-                try: pessoas = r.json().get("dataset", {}).get("getPessoa", [])
-                except: pass
+                # Retry simples se der erro de rede
+                try:
+                    r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=pl_pessoa, timeout=10)
+                except:
+                    time.sleep(1) # Espera e tenta de novo
+                    r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json=pl_pessoa, timeout=10)
 
+                pessoas = r.json().get("dataset", {}).get("getPessoa", [])
+                
                 if pessoas:
-                    for p_data in pessoas:
-                        nome_encontrado = p_data.get("NMPESSOA")
-                        id_v = p_data.get("NRPARCNEGOCIO")
-                        org_v = p_data.get("NRORG")
-                        vinculo = p_data.get("NRVINCULOM")
-                        cpf = p_data.get("NRCPFPESSOA")
-                        admissao = formatar_data(p_data.get("DTADMISSAOPRE"))
-                        nascimento = formatar_data(p_data.get("DTNASCPESSOA"))
-
-                        # B. Busca Contatos
-                        payload_c = {
+                    for p in pessoas:
+                        # 2. Buscar Contatos
+                        pl_contato = {
                             "filter": [
-                                {"name": "P_NRPARCNEGOCIO", "value": id_v},
-                                {"name": "P_NRORG", "value": org_v},
+                                {"name": "P_NRPARCNEGOCIO", "value": p.get("NRPARCNEGOCIO")},
+                                {"name": "P_NRORG", "value": p.get("NRORG")},
                                 {"name": "P_NRORGPADRAO", "value": "0"}
-                            ],
-                            "requestType": "FilterData"
+                            ], "requestType": "FilterData"
                         }
-
-                        r_c = requests.post("https://hcm.teknisa.com/backend/index.php/getFormaComunicacaoParc", headers=headers, json=payload_c, timeout=10)
-                        contatos = []
-                        try: contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
-                        except: pass
-
-                        # Fallback: Tenta buscar sem organização se falhar
+                        
+                        r_c = requests.post("https://hcm.teknisa.com/backend/index.php/getFormaComunicacaoParc", headers=headers, json=pl_contato)
+                        contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
+                        
+                        # Fallback sem Org se vazio
                         if not contatos:
-                            payload_c["filter"] = [{"name": "P_NRPARCNEGOCIO", "value": id_v}]
-                            try:
-                                r_c = requests.post("https://hcm.teknisa.com/backend/index.php/getFormaComunicacaoParc", headers=headers, json=payload_c, timeout=10)
-                                contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
-                            except: pass
+                            pl_contato["filter"] = [{"name": "P_NRPARCNEGOCIO", "value": p.get("NRPARCNEGOCIO")}]
+                            r_c = requests.post("https://hcm.teknisa.com/backend/index.php/getFormaComunicacaoParc", headers=headers, json=pl_contato)
+                            contatos = r_c.json().get("dataset", {}).get("comunicaparc_get", [])
 
-                        # Processa Lista de Contatos
-                        info_list = []
-                        termos_interesse = ["MAIL", "CEL", "FONE", "MOV", "WHATS", "TEL"]
-                        
+                        lista_contatos = []
+                        termos = ["MAIL", "CEL", "FONE", "WHATS", "TEL"]
                         for c in contatos:
-                            tipo = str(c.get('NMFORMACOMU') or "").upper()
-                            valor = c.get('DSCOMUNICAPARC') or c.get('CDCOMUNICAPARC')
-                            
-                            # Filtra apenas contatos úteis
-                            if valor and any(t in tipo for t in termos_interesse):
-                                info_list.append(f"🔹 {tipo}: {valor}")
-                        
+                            t = str(c.get('NMFORMACOMU') or "").upper()
+                            v = c.get('DSCOMUNICAPARC') or c.get('CDCOMUNICAPARC')
+                            if any(x in t for x in termos): lista_contatos.append(f"{t}: {v}")
+
                         relatorio.append({
                             "Busca": nome,
-                            "Nome Completo": nome_encontrado,
-                            "CPF": cpf,
-                            "Admissão": admissao,
-                            "Nascimento": nascimento,
-                            "Contatos": "  ".join(info_list) if info_list else "⚠️ Sem contato cadastrado"
+                            "Nome": p.get("NMPESSOA"),
+                            "CPF": p.get("NRCPFPESSOA"),
+                            "Admissão": formatar_data(p.get("DTADMISSAOPRE")),
+                            "Nascimento": formatar_data(p.get("DTNASCPESSOA")),
+                            "Contatos": " | ".join(lista_contatos) if lista_contatos else "Sem contato"
                         })
                 else:
-                    relatorio.append({"Busca": nome, "Nome Completo": "❌ NÃO LOCALIZADO", "Contatos": "-"})
-
-            except Exception as e:
-                relatorio.append({"Busca": nome, "Nome Completo": "❌ ERRO API", "Contatos": str(e)})
-
-            # Atualiza UI
-            if relatorio:
-                df_temp = pd.DataFrame(relatorio)
-                table_placeholder.dataframe(
-                    df_temp, 
-                    use_container_width=True,
-                    column_config={
-                        "Contatos": st.column_config.TextColumn("Meios de Contato", width="large"),
-                        "Nome Completo": st.column_config.TextColumn("Nome no Sistema", width="medium"),
-                    }
-                )
+                    relatorio.append({"Busca": nome, "Nome": "NÃO ENCONTRADO", "Contatos": "-"})
             
-            progress_bar.progress((i + 1) / total)
-            time.sleep(0.1) # Pequeno delay para não sobrecarregar API visualmente
-
-        st.success("✅ Busca Finalizada!")
+            except Exception as e:
+                relatorio.append({"Busca": nome, "Nome": "ERRO API", "Contatos": str(e)})
+            
+            if relatorio:
+                table_place.dataframe(pd.DataFrame(relatorio), use_container_width=True)
+            
+            bar.progress((i + 1) / total)
         
+        st.success("Finalizado!")
         if relatorio:
-            df_final = pd.DataFrame(relatorio)
-            csv = df_final.to_csv(index=False, sep=';').encode('utf-8-sig')
-            st.download_button(
-                label="📥 Baixar Planilha (Excel/CSV)",
-                data=csv,
-                file_name="contatos_hcm_teknisa.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+            csv = pd.DataFrame(relatorio).to_csv(index=False, sep=';').encode('utf-8-sig')
+            st.download_button("📥 Baixar CSV", csv, "contatos_hcm.csv", "text/csv")
