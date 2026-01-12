@@ -11,25 +11,15 @@ from sqlalchemy import text
 # ==============================================================================
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="🏫")
-    
-    # CSS AVANÇADO PARA FORÇAR LARGURA DA COLUNA DE STATUS
     st.markdown("""
     <style>
         .block-container { padding-top: 1rem; }
         [data-testid="stMetricValue"] { font-size: 32px; font-weight: bold; }
-        
         /* Centralizar textos nas tabelas */
         .stDataFrame div[data-testid="stDataFrame"] div[role="grid"] div[role="row"] div {
             justify-content: center !important;
             text-align: center !important;
         }
-        
-        /* Força a primeira coluna (Status) a ser pequena */
-        [data-testid="stDataFrame"] div[role="grid"] div[role="row"] div:nth-child(2) {
-            max-width: 50px !important;
-            min-width: 40px !important;
-        }
-        
         div.stButton > button { width: 100%; display: block; margin: 0 auto; }
     </style>
     """, unsafe_allow_html=True)
@@ -291,7 +281,7 @@ def main():
             # --- FILTROS ---
             c1, c2, c3, c4, c5 = st.columns([1, 1.5, 1.2, 1, 1])
             
-            # 1. Filtro TIPO
+            # 1. Filtro TIPO (Escola)
             with c1: f_tipo = st.selectbox("🏫 Tipo:", ["Todos"] + sorted(list(df_resumo['Tipo'].unique())))
             
             # 2. Filtro ESCOLA
@@ -385,7 +375,11 @@ def main():
 
                 df_lista['Status'] = df_lista.apply(get_icone, axis=1)
                 
-                # Ordenação
+                # Cores e Sinais
+                df_lista['Cor'] = np.where(df_lista['Saldo'] < 0, '#e74c3c', np.where(df_lista['Saldo'] > 0, '#3498db', '#27ae60'))
+                df_lista['Sinal'] = np.where(df_lista['Saldo'] > 0, '+', '')
+                
+                # Ordenação (Críticos no topo: Vermelho, Amarelo, Azul, Verde)
                 df_lista['rank'] = df_lista['Status'].map({"🔴": 0, "🟡": 1, "🔵": 2, "🟢": 3})
                 df_lista = df_lista.sort_values(['rank', 'Escola'])
 
@@ -404,7 +398,7 @@ def main():
                     selection_mode="single-row",
                     on_select="rerun",
                     column_config={
-                        "Status": st.column_config.TextColumn("🚦", width="small", help="🔴 Falta | 🔵 Excedente | 🟡 Ajuste | 🟢 Ok"),
+                        "Status": st.column_config.TextColumn("Status", width="small", help="🔴 Falta | 🔵 Excedente | 🟡 Ajuste | 🟢 Ok"),
                         "Saldo": st.column_config.NumberColumn("Saldo", format="%+d")
                     }
                 )
