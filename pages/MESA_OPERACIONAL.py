@@ -359,14 +359,24 @@ if df is not None and not df.empty:
     st.markdown("---")
 # -----------------------------------------------------
 
-# Filtro Supervisor
+# === FILTROS NA SIDEBAR ===
 filtro_supervisor = "Todos"
+filtro_status = "TODAS"
+
 if df is not None and not df.empty:
+    # Filtro 1: Supervisor
     opcoes = ["Todos"] + sorted(df['Supervisor'].unique().tolist())
     filtro_supervisor = st.sidebar.selectbox("Filtrar por Supervisor:", opcoes)
+    
+    # Filtro 2: Status/Diagnóstico (NOVO)
+    st.sidebar.markdown("---")
+    opcoes_status = ["TODAS", "🌟 ESCOLA COMPLETA", "⚠️ POSSÍVEL PROBLEMA SMARTPHONE"]
+    filtro_status = st.sidebar.selectbox("Filtrar por Situação:", opcoes_status)
 
 if df is not None and not df.empty:
     df_filtrado = df.copy()
+    
+    # Aplica filtro de Supervisor
     if filtro_supervisor != "Todos":
         df_filtrado = df_filtrado[df_filtrado['Supervisor'] == filtro_supervisor]
 
@@ -374,7 +384,7 @@ if df is not None and not df.empty:
         st.warning("Nenhum dado encontrado para o filtro selecionado.")
         st.stop()
 
-    # --- KPIs ---
+    # --- KPIs (Baseados no Supervisor Selecionado) ---
     qtd_presente = len(df_filtrado[df_filtrado['Status_Individual'] == '🟢 Presente'])
     qtd_falta = len(df_filtrado[df_filtrado['Status_Individual'] == '🔴 Falta'])
     qtd_a_entrar = len(df_filtrado[df_filtrado['Status_Individual'] == '⏳ A Iniciar'])
@@ -419,6 +429,14 @@ if df is not None and not df.empty:
 
     resumo['Diagnostico'] = resumo.apply(definir_diagnostico, axis=1)
 
+    # === APLICAÇÃO DO FILTRO DE STATUS (NOVO) ===
+    # Filtra o RESUMO baseado no diagnóstico calculado acima
+    if filtro_status == "🌟 ESCOLA COMPLETA":
+        resumo = resumo[resumo['Diagnostico'].str.contains("COMPLETA", na=False)]
+    elif filtro_status == "⚠️ POSSÍVEL PROBLEMA SMARTPHONE":
+        resumo = resumo[resumo['Diagnostico'].str.contains("PROBLEMA", na=False)]
+    # Se for TODAS, não faz nada
+
     # Ordenação
     def get_sort_key(row):
         d = row['Diagnostico']
@@ -427,13 +445,14 @@ if df is not None and not df.empty:
         if "AGUARDANDO" in d: return 2
         return 1
 
-    resumo['sort_group'] = resumo.apply(get_sort_key, axis=1)
-    resumo['perc_presenca'] = resumo['Presentes'] / (resumo['Efetivo'].replace(0, 1))
-    resumo = resumo.sort_values(by=['sort_group', 'perc_presenca'], ascending=[True, True])
+    if not resumo.empty:
+        resumo['sort_group'] = resumo.apply(get_sort_key, axis=1)
+        resumo['perc_presenca'] = resumo['Presentes'] / (resumo['Efetivo'].replace(0, 1))
+        resumo = resumo.sort_values(by=['sort_group', 'perc_presenca'], ascending=[True, True])
 
     # --- KPIs Diagnóstico ---
-    qtd_problema = len(resumo[resumo['Diagnostico'].str.contains("PROBLEMA")])
-    qtd_completas = len(resumo[resumo['Diagnostico'].str.contains("COMPLETA")])
+    qtd_problema = len(resumo[resumo['Diagnostico'].str.contains("PROBLEMA", na=False)])
+    qtd_completas = len(resumo[resumo['Diagnostico'].str.contains("COMPLETA", na=False)])
     
     c_info1, c_info2 = st.columns(2)
     with c_info1:
@@ -444,48 +463,52 @@ if df is not None and not df.empty:
     # --- Tabela Visual ---
     st.markdown(f"### 🏫 Visão por Unidade ({filtro_supervisor})")
     
-    event = st.dataframe(
-        resumo[['Escola', 'Supervisor', 'Diagnostico', 'Efetivo', 'Presentes', 'Faltas', 'A_Entrar']],
-        use_container_width=True,
-        hide_index=True,
-        selection_mode="single-row",
-        on_select="rerun",
-        column_config={
-            "Escola": st.column_config.TextColumn("Escola", width="large"),
-            "Diagnostico": st.column_config.TextColumn("Status", width="medium"),
-            "Efetivo": st.column_config.NumberColumn("Total", format="%d 👤"),
-            "Presentes": st.column_config.NumberColumn("Ok", format="%d 🟢"),
-            "Faltas": st.column_config.NumberColumn("Faltas", format="%d 🔴"),
-            "A_Entrar": st.column_config.NumberColumn("A Iniciar", format="%d ⏳"),
-        }
-    )
-
-    # --- Popup Detalhe ---
-    @st.dialog("Detalhe da Escola", width="large")
-    def mostrar_detalhe(escola, supervisor, df_local, diag):
-        st.subheader(f"🏫 {escola}")
-        st.caption(f"Supervisor: {supervisor} | Status: {diag}")
-        
-        mapa_ordem = {'🔴 Falta': 0, '🟢 Presente': 1, '⏳ A Iniciar': 2, '🟡 S/ Escala': 3}
-        df_local['ordem'] = df_local['Status_Individual'].map(mapa_ordem)
-        df_show = df_local.sort_values('ordem')
-
-        st.dataframe(
-            df_show[['Status_Individual', 'Funcionario', 'Cargo', 'Escala_Formatada', 'Ponto_Real']],
+    if resumo.empty:
+        st.info("Nenhuma escola corresponde ao filtro selecionado.")
+    else:
+        event = st.dataframe(
+            resumo[['Escola', 'Supervisor', 'Diagnostico', 'Efetivo', 'Presentes', 'Faltas', 'A_Entrar']],
             use_container_width=True,
             hide_index=True,
+            selection_mode="single-row",
+            on_select="rerun",
             column_config={
-                "Status_Individual": st.column_config.TextColumn("Situação", width="small"),
-                "Escala_Formatada": st.column_config.TextColumn("Escala Prevista", width="medium"),
-                "Ponto_Real": st.column_config.TextColumn("Batidas", width="medium"),
+                "Escola": st.column_config.TextColumn("Escola", width="large"),
+                "Diagnostico": st.column_config.TextColumn("Status", width="medium"),
+                "Efetivo": st.column_config.NumberColumn("Total", format="%d 👤"),
+                "Presentes": st.column_config.NumberColumn("Ok", format="%d 🟢"),
+                "Faltas": st.column_config.NumberColumn("Faltas", format="%d 🔴"),
+                "A_Entrar": st.column_config.NumberColumn("A Iniciar", format="%d ⏳"),
             }
         )
 
-    if len(event.selection.rows) > 0:
-        idx = event.selection.rows[0]
-        row = resumo.iloc[idx]
-        df_detalhe = df_filtrado[df_filtrado['Escola'] == row['Escola']]
-        mostrar_detalhe(row['Escola'], row['Supervisor'], df_detalhe, row['Diagnostico'])
+        # --- Popup Detalhe ---
+        @st.dialog("Detalhe da Escola", width="large")
+        def mostrar_detalhe(escola, supervisor, df_local, diag):
+            st.subheader(f"🏫 {escola}")
+            st.caption(f"Supervisor: {supervisor} | Status: {diag}")
+            
+            mapa_ordem = {'🔴 Falta': 0, '🟢 Presente': 1, '⏳ A Iniciar': 2, '🟡 S/ Escala': 3}
+            df_local['ordem'] = df_local['Status_Individual'].map(mapa_ordem)
+            df_show = df_local.sort_values('ordem')
+
+            st.dataframe(
+                df_show[['Status_Individual', 'Funcionario', 'Cargo', 'Escala_Formatada', 'Ponto_Real']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Status_Individual": st.column_config.TextColumn("Situação", width="small"),
+                    "Escala_Formatada": st.column_config.TextColumn("Escala Prevista", width="medium"),
+                    "Ponto_Real": st.column_config.TextColumn("Batidas", width="medium"),
+                }
+            )
+
+        if len(event.selection.rows) > 0:
+            idx = event.selection.rows[0]
+            # Ajuste de índice: precisamos pegar a linha correta do resumo filtrado
+            row = resumo.iloc[idx]
+            df_detalhe = df_filtrado[df_filtrado['Escola'] == row['Escola']]
+            mostrar_detalhe(row['Escola'], row['Supervisor'], df_detalhe, row['Diagnostico'])
 
 elif df is not None and df.empty:
     st.info(f"Nenhum dado encontrado para a data {data_exibicao}.")
