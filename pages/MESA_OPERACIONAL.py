@@ -633,6 +633,20 @@ if df is not None and not df.empty:
             st.caption(f"Supervisor: {supervisor} | Status: {diag}")
             
             st.markdown("##### 📉 Mesa Operacional (Hoje)")
+
+            # --- NOVOS KPIs (ADICIONADOS AQUI) ---
+            qtd_total_local = len(df_local)
+            qtd_pres_local = len(df_local[df_local['Status_Individual'] == '🟢 Presente'])
+            qtd_falt_local = len(df_local[df_local['Status_Individual'] == '🔴 Falta'])
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Total Previsto", qtd_total_local)
+            k2.metric("Presentes", qtd_pres_local)
+            k3.metric("Faltas", qtd_falt_local)
+            # --------------------------------------
+
+            st.divider()
+
             mapa_ordem = {'🔴 Falta': 0, '🟢 Presente': 1, '⏳ A Iniciar': 2, '🟡 S/ Escala': 3}
             df_show = df_local.copy()
             df_show['ordem'] = df_show['Status_Individual'].map(mapa_ordem)
