@@ -5,11 +5,12 @@ import plotly.express as px
 import numpy as np 
 from PIL import Image
 from sqlalchemy import text
+from datetime import datetime
 
 # ==============================================================================
 # CONFIGURAÇÕES E CONSTANTES
 # ==============================================================================
-ID_VOLANTES = 101092601 # ID da Unidade de Volantes
+ID_VOLANTES = 101092601 # ID da Unidade de origem dos Volantes
 
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
@@ -70,7 +71,7 @@ def buscar_dados_auxiliares(_conn):
 
 @st.cache_data(ttl=600, show_spinner=False)
 def buscar_dados_operacionais(_conn):
-    # Query Resumo
+    # --- 1. Query Resumo (QUADRO DE VAGAS OFICIAL) ---
     query_resumo = """
     WITH ContagemReal AS (
         SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
@@ -97,7 +98,7 @@ def buscar_dados_operacionais(_conn):
     ORDER BY u."NomeUnidade", c."NomeCargo";
     """
     
-    # Query Funcionários
+    # --- 2. Query Funcionários (OFICIAL FIXO) ---
     query_funcionarios = """
     SELECT u."UnidadeID", u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
     FROM "Colaboradores" col
@@ -107,14 +108,38 @@ def buscar_dados_operacionais(_conn):
     ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
     """
 
+    # --- 3. Query Alocação de Volantes (TABELA ESPECIFICA) ---
+    # Assume que a tabela AlocacaoVolantes tem: AlocacaoID, ColaboradorID, UnidadeID, Ativo
+    query_alocacoes = """
+    SELECT 
+        av."AlocacaoID",
+        av."UnidadeID",
+        u."NomeUnidade" as "EscolaDestino",
+        av."ColaboradorID",
+        col."Nome" as "Volante",
+        c."NomeCargo" as "Cargo"
+    FROM "AlocacaoVolantes" av
+    JOIN "Colaboradores" col ON av."ColaboradorID" = col."ColaboradorID"
+    JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+    JOIN "Unidades" u ON av."UnidadeID" = u."UnidadeID"
+    WHERE av."Ativo" = TRUE
+    """
+
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
-
-    # --- SEPARAÇÃO DOS VOLANTES ---
-    # Filtra as pessoas que são da unidade de Volantes
-    df_volantes_pessoas = df_pessoas[df_pessoas['UnidadeID'] == ID_VOLANTES].copy()
     
-    # Remove a unidade de volantes dos DataFrames principais para não aparecer na Gestão Escolas
+    # Tenta buscar alocações, se a tabela não existir, cria DF vazio para não quebrar
+    try:
+        df_alocacoes = _conn.query(query_alocacoes)
+    except:
+        df_alocacoes = pd.DataFrame(columns=["AlocacaoID", "UnidadeID", "EscolaDestino", "ColaboradorID", "Volante", "Cargo"])
+
+    # --- PROCESSAMENTO ---
+    
+    # 1. Isolar quem é volante na tabela de pessoas (quem tem cargo/unidade de volante)
+    df_todos_volantes = df_pessoas[df_pessoas['UnidadeID'] == ID_VOLANTES].copy()
+    
+    # 2. Limpar DataFrame principal (Tirar volantes da visão de escolas, se estivessem lá)
     df_resumo = df_resumo[df_resumo['UnidadeID'] != ID_VOLANTES]
     df_pessoas = df_pessoas[df_pessoas['UnidadeID'] != ID_VOLANTES]
 
@@ -128,7 +153,7 @@ def buscar_dados_operacionais(_conn):
     df_resumo['Diferenca_Display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
     df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
     
-    return df_resumo, df_pessoas, df_volantes_pessoas
+    return df_resumo, df_pessoas, df_todos_volantes, df_alocacoes
 
 def acao_atualizar_data(unidade_id, nova_data, conn):
     try:
@@ -148,25 +173,11 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
 # MODAIS (DIALOGS)
 # ==============================================================================
 
-@st.dialog("🚙 Lista Geral de Volantes", width="large")
-def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
-    # Este é o modal acessado pelo KPI no topo
-    st.markdown("### 📋 Colaboradores Volantes (Banco)")
-    st.caption("Pessoas cadastradas na unidade 101092601")
-    
-    if not df_volantes.empty:
-        st.dataframe(
-            df_volantes[['ID', 'Funcionario', 'Cargo']], 
-            use_container_width=True, 
-            hide_index=True
-        )
-    else:
-        st.info("Nenhum volante cadastrado no momento.")
-
-# --- ATUALIZAÇÃO AQUI: ADICIONAMOS O ARGUMENTO df_volantes_pool ---
 @st.dialog("🏫 Detalhes da Unidade", width="large")
-def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view, conn, df_unidades_list, df_cargos_list, df_volantes_pool):
+def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view, conn, df_unidades_list, df_cargos_list, df_todos_volantes, df_alocacoes):
     
+    unidade_id_atual = int(row_stats['UnidadeID'])
+
     # 1. Info e Data
     c1, c2 = st.columns([2, 1])
     with c1:
@@ -178,7 +189,7 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
         with st.popover(lbl, use_container_width=True):
             nova_dt = st.date_input("Data:", value=pd.Timestamp.today() if pd.isnull(dt_atual) else dt_atual, format="DD/MM/YYYY")
             if st.button("Salvar Data"):
-                acao_atualizar_data(int(row_stats['UnidadeID']), nova_dt, conn)
+                acao_atualizar_data(unidade_id_atual, nova_dt, conn)
 
     # 2. Resumo Visual
     cor_resumo = row_stats['Cor']
@@ -192,12 +203,12 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
     """, unsafe_allow_html=True)
 
     # 3. Tabela de Cargos
-    st.caption("📊 Quadro de Vagas")
+    st.caption("📊 Quadro de Vagas (Funcionários Fixos)")
     df_view = df_cargos_view[['Cargo','Edital','Real','Diferenca_Display','Status_Display']].rename(columns={'Diferenca_Display':'Diferenca', 'Status_Display':'Status'})
     st.dataframe(df_view, use_container_width=True, hide_index=True)
 
-    # 4. Edição de Funcionários da Escola
-    st.caption("📋 Colaboradores Locais (Selecione para Editar)")
+    # 4. Edição de Funcionários Fixos
+    st.caption("📋 Colaboradores Fixos (Selecione para Editar)")
     if not df_pessoas_view.empty:
         event = st.dataframe(
             df_pessoas_view[['ID','Funcionario','Cargo']],
@@ -209,7 +220,7 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
             idx = event.selection.rows[0]
             colab = df_pessoas_view.iloc[idx]
             
-            with st.expander(f"✏️ Editar: {colab['Funcionario']}", expanded=True):
+            with st.expander(f"✏️ Editar Fixo: {colab['Funcionario']}", expanded=True):
                 with st.form(f"edit_{colab['ID']}"):
                     lst_esc = df_unidades_list['NomeUnidade'].tolist()
                     lst_car = df_cargos_list['NomeCargo'].tolist()
@@ -223,7 +234,7 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
                     n_car = st.selectbox("Alterar Cargo:", lst_car, index=i_car)
                     n_atv = st.checkbox("Manter Ativo?", value=True)
                     
-                    if st.form_submit_button("💾 Confirmar Alteração"):
+                    if st.form_submit_button("💾 Salvar Alteração"):
                         try:
                             uid_new = int(df_unidades_list[df_unidades_list['NomeUnidade'] == n_esc]['UnidadeID'].iloc[0])
                             cid_new = int(df_cargos_list[df_cargos_list['NomeCargo'] == n_car]['CargoID'].iloc[0])
@@ -238,54 +249,75 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
                         except Exception as e:
                             st.error(f"Erro: {e}")
     else:
-        st.info("Nenhum colaborador nesta unidade.")
+        st.info("Nenhum colaborador fixo nesta unidade.")
 
-    # 5. --- NOVA SEÇÃO: VOLANTES ---
+    # ==========================================================
+    # 5. GESTÃO DE VOLANTES (USANDO TABELA ALOCACAOVOLANTES)
+    # ==========================================================
     st.divider()
+    st.markdown("#### 🚙 Volantes em Apoio")
     
-    # Verifica se tem alguém na lista de pessoas da escola que possa ser um volante "cobrindo" (opcional, visual)
-    # Vamos assumir que "cobrir" significa que podemos trazer alguém do pool para cá
+    # 5.1 Mostrar Volantes Atualmente Alocados AQUI
+    volantes_aqui = df_alocacoes[df_alocacoes['UnidadeID'] == unidade_id_atual]
     
-    st.markdown("#### 🚙 Apoio / Volantes")
-    if not df_volantes_pool.empty:
-        # Mostra quantos tem disponíveis
-        st.caption(f"Há {len(df_volantes_pool)} volantes disponíveis no banco (Unidade 101092601).")
+    if not volantes_aqui.empty:
+        st.info(f"Há {len(volantes_aqui)} volante(s) cobrindo esta unidade.")
         
-        with st.expander("👀 Ver/Alocar Volante Disponível"):
-            # Lógica para trazer um volante para cá
-            with st.form("form_trazer_volante"):
-                opcoes_v = df_volantes_pool['Funcionario'].tolist()
-                sel_v = st.selectbox("Selecione o Volante para trazer:", opcoes_v)
-                
-                # Pega dados do selecionado
-                dados_v = df_volantes_pool[df_volantes_pool['Funcionario'] == sel_v].iloc[0]
-                
-                # Tenta pré-selecionar o cargo dele
-                lst_car_v = df_cargos_list['NomeCargo'].tolist()
-                try: idx_c_v = lst_car_v.index(dados_v['Cargo'])
-                except: idx_c_v = 0
-                
-                c_destino = st.selectbox("Cargo na Escola:", lst_car_v, index=idx_c_v)
-                
-                if st.form_submit_button("📍 Mover Volante para esta Escola"):
+        # Exibe com botão de remover
+        for index, row in volantes_aqui.iterrows():
+            c_v1, c_v2, c_v3 = st.columns([3, 2, 1])
+            with c_v1: st.write(f"**{row['Volante']}**")
+            with c_v2: st.caption(f"{row['Cargo']}")
+            with c_v3:
+                if st.button("❌", key=f"del_aloc_{row['AlocacaoID']}", help="Remover alocação"):
                     try:
-                        uid_dest = int(row_stats['UnidadeID']) # ID desta escola
-                        cid_dest = int(df_cargos_list[df_cargos_list['NomeCargo'] == c_destino]['CargoID'].iloc[0])
-                        
                         with conn.session as s:
-                            s.execute(text('UPDATE "Colaboradores" SET "UnidadeID"=:u, "CargoID"=:c WHERE "ColaboradorID"=:i'), 
-                                            {'u': uid_dest, 'c': cid_dest, 'i': int(dados_v['ID'])})
+                            # Opção A: Delete fisico
+                            # s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "AlocacaoID" = :aid'), {'aid': row['AlocacaoID']})
+                            # Opção B: Soft Delete (Update Ativo = False) -> Mais seguro
+                            s.execute(text('UPDATE "AlocacaoVolantes" SET "Ativo" = FALSE WHERE "AlocacaoID" = :aid'), {'aid': row['AlocacaoID']})
                             s.commit()
                         st.cache_data.clear()
-                        st.toast(f"{sel_v} movido para cá!", icon="✅")
+                        st.toast("Volante liberado!", icon="👋")
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Erro ao mover: {e}")
-            
-            # Apenas mostra tabela visual
-            st.dataframe(df_volantes_pool[['Funcionario', 'Cargo']], use_container_width=True, hide_index=True)
+                        st.error(f"Erro: {e}")
     else:
-        st.caption("Nenhum volante disponível no banco de dados.")
+        st.caption("Nenhum volante alocado nesta escola no momento.")
+
+    # 5.2 Formulário para Alocar Novo Volante
+    with st.expander("➕ Adicionar Volante (Alocação Temporária)"):
+        # Filtra volantes que NÃO estão alocados em lugar nenhum (para não duplicar)
+        # Pega IDs de todos que estão na tabela AlocacaoVolantes como Ativos
+        ids_alocados = df_alocacoes['ColaboradorID'].unique().tolist()
+        
+        # Filtra o DF de todos os volantes
+        volantes_disponiveis = df_todos_volantes[~df_todos_volantes['ID'].isin(ids_alocados)]
+        
+        if not volantes_disponiveis.empty:
+            with st.form("form_alocar_volante"):
+                lista_nomes = volantes_disponiveis['Funcionario'].tolist()
+                nome_sel = st.selectbox("Selecione o Volante Disponível:", lista_nomes)
+                
+                if st.form_submit_button("📍 Alocar Nesta Escola"):
+                    try:
+                        id_volante = int(volantes_disponiveis[volantes_disponiveis['Funcionario'] == nome_sel]['ID'].iloc[0])
+                        
+                        # INSERE NA TABELA DE ALOCAÇÃO (Mantendo o cadastro dele na unidade de origem)
+                        with conn.session as s:
+                            s.execute(text("""
+                                INSERT INTO "AlocacaoVolantes" ("UnidadeID", "ColaboradorID", "DataInicio", "Ativo")
+                                VALUES (:uid, :cid, :dt, TRUE)
+                            """), {'uid': unidade_id_atual, 'cid': id_volante, 'dt': datetime.now()})
+                            s.commit()
+                        
+                        st.cache_data.clear()
+                        st.toast(f"{nome_sel} alocado com sucesso!", icon="✅")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao alocar: {e}")
+        else:
+            st.warning("Não há volantes livres no momento.")
 
 
 # ==============================================================================
@@ -297,7 +329,7 @@ def exibir_sidebar(authenticator, nome_usuario):
         st.divider()
         st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar')
 
-def exibir_metricas_topo(df, qtd_volantes, conn, df_volantes, df_unidades_list, df_cargos_list):
+def exibir_metricas_topo(df, df_todos, df_alocados):
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     
     total_edital = int(df['Edital'].sum())
@@ -308,10 +340,13 @@ def exibir_metricas_topo(df, qtd_volantes, conn, df_volantes, df_unidades_list, 
     with c2: st.metric("👥 Efetivo Atual", total_real)
     with c3: st.metric("⚖️ Saldo Geral", saldo, delta_color="normal")
     
+    # KPI Volantes
+    total_v = len(df_todos)
+    ocupados_v = len(df_alocados)
+    livres_v = total_v - ocupados_v
+    
     with c4:
-        st.metric("🚙 Volantes", f"{qtd_volantes}", help="Podemos ter até 20 volantes")
-        if st.button("Ver Volantes"):
-            modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list)
+        st.metric("🚙 Volantes (Livres)", f"{livres_v}/{total_v}", help="Volantes não alocados / Total de volantes")
             
     st.markdown("---")
 
@@ -352,14 +387,14 @@ def main():
         try:
             conn = st.connection("postgres", type="sql")
             df_unidades_list, df_cargos_list = buscar_dados_auxiliares(conn)
-            # Retorna também o dataframe exclusivo de volantes (pool)
-            df_resumo, df_pessoas, df_volantes = buscar_dados_operacionais(conn)
+            
+            # Busca os dados, incluindo a tabela de alocação separada
+            df_resumo, df_pessoas, df_todos_volantes, df_alocacoes = buscar_dados_operacionais(conn)
             
             st.title("📊 Mesa Operacional")
             
-            # Passando dados de volantes para o topo
-            qtd_volantes = len(df_volantes)
-            exibir_metricas_topo(df_resumo, qtd_volantes, conn, df_volantes, df_unidades_list, df_cargos_list)
+            # Passando dados para topo
+            exibir_metricas_topo(df_resumo, df_todos_volantes, df_alocacoes)
             
             exibir_graficos_gerais(df_resumo)
 
@@ -396,15 +431,14 @@ def main():
             if f_esc != "Todas": mask &= (df_resumo['Escola'] == f_esc)
             if f_sup != "Todos": mask &= (df_resumo['Supervisor'] == f_sup)
             
-            # Lógica de Situação Geral da Escola
             if f_sts != "Todas":
                 agg = df_resumo.groupby('Escola').agg({'Edital': 'sum', 'Real': 'sum', 'Status_Codigo': list}).reset_index()
                 agg['Saldo'] = agg['Real'] - agg['Edital']
                 
                 conds = [
-                    agg['Saldo'] < 0, # Falta
-                    agg['Saldo'] > 0, # Excedente
-                    (agg['Saldo'] == 0) & (agg['Status_Codigo'].apply(lambda x: 'OK' not in x or any(s != 'OK' for s in x))) # Ajuste
+                    agg['Saldo'] < 0,
+                    agg['Saldo'] > 0,
+                    (agg['Saldo'] == 0) & (agg['Status_Codigo'].apply(lambda x: 'OK' not in x or any(s != 'OK' for s in x)))
                 ]
                 
                 agg['Sts_Calc'] = np.select(conds, ["🔴 FALTA", "🔵 EXCEDENTE", "🟡 AJUSTE"], default="🟢 OK")
@@ -491,8 +525,8 @@ def main():
                         df_pessoas_sel = df_pessoas_sel[df_pessoas_sel['Funcionario'].str.contains(f_txt, case=False, na=False) | 
                                                                                 df_pessoas_sel['ID'].astype(str).str.contains(f_txt, na=False)]
 
-                    # AQUI PASSAMOS O df_volantes PARA O MODAL
-                    modal_detalhe_escola(esc_sel, row_stats, df_cargos_sel, df_pessoas_sel, conn, df_unidades_list, df_cargos_list, df_volantes)
+                    # Passamos os Dataframes de Volantes e Alocações
+                    modal_detalhe_escola(esc_sel, row_stats, df_cargos_sel, df_pessoas_sel, conn, df_unidades_list, df_cargos_list, df_todos_volantes, df_alocacoes)
             
             else:
                 st.warning("Nenhum resultado para os filtros aplicados.")
