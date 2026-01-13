@@ -1,14 +1,3 @@
-Boa tarde! Com base no log da requisição (que mostra um `POST` para criar a mensagem) e no seu código atual, fiz as adaptações necessárias.
-
-Aqui estão as principais mudanças implementadas:
-
-1. **Filtro por Escola:** Adicionei um `multiselect` na barra lateral para filtrar por `ueNome`.
-2. **Seleção Múltipla:** Alterei o `st.dataframe` para `selection_mode="multi-row"`.
-3. **Envio em Massa:** Criei uma função nova `enviar_resposta_api` que replica exatamente o cabeçalho e payload do seu log, e adicionei uma interface abaixo da tabela para digitar a mensagem e enviar para todos os IDs selecionados de uma vez.
-
-Aqui está o código completo atualizado:
-
-```python
 import streamlit as st
 import pandas as pd
 import altair as alt
