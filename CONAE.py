@@ -274,7 +274,7 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                     if esta_alocado:
                         st.info(f"Em: **{row['EscolaDestino']}**")
                         # BOTÃO SEM COR (REMOVIDO type="primary")
-                        if st.button("🔓 Liberar"):
+                        if st.button("Desalocar"):
                             acao_desalocar_volante(colab_id, conn)
                     else:
                         st.success("**Disponível**")
