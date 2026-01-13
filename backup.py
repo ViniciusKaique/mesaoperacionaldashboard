@@ -7,10 +7,8 @@ from PIL import Image
 from sqlalchemy import text
 
 # ==============================================================================
-# CONFIGURAÇÕES E CONSTANTES
+# CONFIGURAÇÕES INICIAIS
 # ==============================================================================
-ID_VOLANTES = 101092601 # ID da Unidade de Volantes
-
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
     st.markdown("""
@@ -97,9 +95,9 @@ def buscar_dados_operacionais(_conn):
     ORDER BY u."NomeUnidade", c."NomeCargo";
     """
     
-    # Query Funcionários (Adicionado u."UnidadeID" para filtrar corretamente)
+    # Query Funcionários
     query_funcionarios = """
-    SELECT u."UnidadeID", u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
+    SELECT u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
     FROM "Colaboradores" col
     JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
     JOIN "Cargos" c ON col."CargoID" = c."CargoID"
@@ -109,14 +107,6 @@ def buscar_dados_operacionais(_conn):
 
     df_resumo = _conn.query(query_resumo)
     df_pessoas = _conn.query(query_funcionarios)
-
-    # --- SEPARAÇÃO DOS VOLANTES ---
-    # Filtra as pessoas que são da unidade de Volantes
-    df_volantes_pessoas = df_pessoas[df_pessoas['UnidadeID'] == ID_VOLANTES].copy()
-    
-    # Remove a unidade de volantes dos DataFrames principais para não aparecer na Gestão Escolas
-    df_resumo = df_resumo[df_resumo['UnidadeID'] != ID_VOLANTES]
-    df_pessoas = df_pessoas[df_pessoas['UnidadeID'] != ID_VOLANTES]
 
     # Lógica de Status (Texto Puro)
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
@@ -128,7 +118,7 @@ def buscar_dados_operacionais(_conn):
     df_resumo['Diferenca_Display'] = df_resumo['Diferenca_num'].apply(lambda x: f"+{x}" if x > 0 else str(int(x)))
     df_resumo['DataConferencia'] = pd.to_datetime(df_resumo['DataConferencia'])
     
-    return df_resumo, df_pessoas, df_volantes_pessoas
+    return df_resumo, df_pessoas
 
 def acao_atualizar_data(unidade_id, nova_data, conn):
     try:
@@ -145,63 +135,8 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
         st.error(f"Erro: {e}")
 
 # ==============================================================================
-# MODAIS (DIALOGS)
+# MODAL DE DETALHES
 # ==============================================================================
-
-@st.dialog("🚙 Lista de Volantes", width="large")
-def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
-    st.markdown("### 📋 Colaboradores Volantes")
-    st.caption("Pessoas cadastradas na unidade 101092601")
-    
-    if not df_volantes.empty:
-        # Exibir tabela simples
-        st.dataframe(
-            df_volantes[['ID', 'Funcionario', 'Cargo']], 
-            use_container_width=True, 
-            hide_index=True
-        )
-
-        st.markdown("---")
-        st.caption("✏️ Editar Volante (Transferir ou Alterar Cargo)")
-        
-        # Selectbox para escolher quem editar
-        opcoes_volantes = df_volantes['Funcionario'].tolist()
-        escolha = st.selectbox("Selecione o volante:", ["Selecione..."] + opcoes_volantes)
-        
-        if escolha != "Selecione...":
-            colab = df_volantes[df_volantes['Funcionario'] == escolha].iloc[0]
-            
-            with st.form(f"edit_volante_{colab['ID']}"):
-                lst_esc = df_unidades_list['NomeUnidade'].tolist()
-                lst_car = df_cargos_list['NomeCargo'].tolist()
-                
-                # Tenta achar o index atual
-                try: i_car = lst_car.index(colab['Cargo'])
-                except: i_car = 0
-                
-                # Campos de edição
-                st.write(f"**Editando:** {colab['Funcionario']}")
-                n_esc = st.selectbox("Mover para Unidade:", lst_esc, index=0, help="Selecione a escola para onde ele vai, ou mantenha na unidade de volantes")
-                n_car = st.selectbox("Alterar Cargo:", lst_car, index=i_car)
-                n_atv = st.checkbox("Manter Ativo?", value=True)
-                
-                if st.form_submit_button("💾 Salvar Alteração"):
-                    try:
-                        uid_new = int(df_unidades_list[df_unidades_list['NomeUnidade'] == n_esc]['UnidadeID'].iloc[0])
-                        cid_new = int(df_cargos_list[df_cargos_list['NomeCargo'] == n_car]['CargoID'].iloc[0])
-                        
-                        with conn.session as s:
-                            s.execute(text('UPDATE "Colaboradores" SET "UnidadeID"=:u, "CargoID"=:c, "Ativo"=:a WHERE "ColaboradorID"=:i'), 
-                                          {'u': uid_new, 'c': cid_new, 'a': n_atv, 'i': int(colab['ID'])})
-                            s.commit()
-                        st.cache_data.clear()
-                        st.toast("Volante atualizado com sucesso!", icon="🎉")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erro: {e}")
-    else:
-        st.info("Nenhum volante cadastrado no momento.")
-
 @st.dialog("🏫 Detalhes da Unidade", width="large")
 def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view, conn, df_unidades_list, df_cargos_list):
     
@@ -268,7 +203,7 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
                             
                             with conn.session as s:
                                 s.execute(text('UPDATE "Colaboradores" SET "UnidadeID"=:u, "CargoID"=:c, "Ativo"=:a WHERE "ColaboradorID"=:i'), 
-                                              {'u': uid_new, 'c': cid_new, 'a': n_atv, 'i': int(colab['ID'])})
+                                          {'u': uid_new, 'c': cid_new, 'a': n_atv, 'i': int(colab['ID'])})
                                 s.commit()
                             st.cache_data.clear()
                             st.toast("Sucesso!", icon="🎉")
@@ -287,9 +222,8 @@ def exibir_sidebar(authenticator, nome_usuario):
         st.divider()
         st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar')
 
-def exibir_metricas_topo(df, qtd_volantes, conn, df_volantes, df_unidades_list, df_cargos_list):
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1]) # Adicionada coluna extra para Volantes
-    
+def exibir_metricas_topo(df):
+    c1, c2, c3 = st.columns(3)
     total_edital = int(df['Edital'].sum())
     total_real = int(df['Real'].sum())
     saldo = total_real - total_edital
@@ -297,14 +231,6 @@ def exibir_metricas_topo(df, qtd_volantes, conn, df_volantes, df_unidades_list, 
     with c1: st.metric("📋 Total Edital", total_edital)
     with c2: st.metric("👥 Efetivo Atual", total_real)
     with c3: st.metric("⚖️ Saldo Geral", saldo, delta_color="normal")
-    
-    # --- NOVO KPI VOLANTES ---
-    with c4:
-        # Help cria o tooltip ao passar o mouse
-        st.metric("🚙 Volantes", f"{qtd_volantes}", help="Podemos ter até 20 volantes")
-        if st.button("Ver Volantes"):
-            modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list)
-            
     st.markdown("---")
 
 def exibir_graficos_gerais(df):
@@ -344,15 +270,10 @@ def main():
         try:
             conn = st.connection("postgres", type="sql")
             df_unidades_list, df_cargos_list = buscar_dados_auxiliares(conn)
-            # Agora retorna também o dataframe exclusivo de volantes
-            df_resumo, df_pessoas, df_volantes = buscar_dados_operacionais(conn)
+            df_resumo, df_pessoas = buscar_dados_operacionais(conn)
             
             st.title("📊 Mesa Operacional")
-            
-            # Passando dados de volantes para o topo
-            qtd_volantes = len(df_volantes)
-            exibir_metricas_topo(df_resumo, qtd_volantes, conn, df_volantes, df_unidades_list, df_cargos_list)
-            
+            exibir_metricas_topo(df_resumo)
             exibir_graficos_gerais(df_resumo)
 
             st.markdown("---")
@@ -493,7 +414,7 @@ def main():
                     
                     if f_txt:
                         df_pessoas_sel = df_pessoas_sel[df_pessoas_sel['Funcionario'].str.contains(f_txt, case=False, na=False) | 
-                                                                    df_pessoas_sel['ID'].astype(str).str.contains(f_txt, na=False)]
+                                                      df_pessoas_sel['ID'].astype(str).str.contains(f_txt, na=False)]
 
                     modal_detalhe_escola(esc_sel, row_stats, df_cargos_sel, df_pessoas_sel, conn, df_unidades_list, df_cargos_list)
             
