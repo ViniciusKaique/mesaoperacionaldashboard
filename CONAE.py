@@ -162,7 +162,7 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
         st.error(f"Erro: {e}")
 
 # ==============================================================================
-# NOVAS FUNÇÕES: REGISTRO HISTÓRICO (ADICIONADO)
+# NOVAS FUNÇÕES: REGISTRO HISTÓRICO
 # ==============================================================================
 def registrar_historico_uso(conn):
     """Calcula e salva o % de uso dos volantes na data de hoje."""
@@ -204,7 +204,7 @@ def acao_alocar_volante(colab_id, unidade_destino_id, conn):
                       {'cid': colab_id, 'uid': unidade_destino_id})
             s.commit()
         
-        # [ADICIONADO] Atualiza histórico
+        # Atualiza histórico
         registrar_historico_uso(conn)
 
         st.cache_data.clear()
@@ -219,7 +219,7 @@ def acao_desalocar_volante(colab_id, conn):
             s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "ColaboradorID" = :id AND "DataAlocacao" = CURRENT_DATE'), {'id': colab_id})
             s.commit()
         
-        # [ADICIONADO] Atualiza histórico
+        # Atualiza histórico
         registrar_historico_uso(conn)
         
         st.cache_data.clear()
@@ -234,7 +234,7 @@ def acao_desalocar_volante(colab_id, conn):
 @st.dialog("🚙 Gestão de Volantes (Diário)", width="large")
 def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
     
-    # [ADICIONADO] Abas para separar Operação do Histórico
+    # Abas para separar Operação do Histórico
     tab_op, tab_hist = st.tabs(["🛠️ Operação Hoje", "📈 Histórico de Uso"])
 
     with tab_op:
@@ -273,7 +273,8 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                     st.write(""); st.write("") 
                     if esta_alocado:
                         st.info(f"Em: **{row['EscolaDestino']}**")
-                        if st.button("🔓 Liberar", type="primary"):
+                        # BOTÃO SEM COR (REMOVIDO type="primary")
+                        if st.button("🔓 Liberar"):
                             acao_desalocar_volante(colab_id, conn)
                     else:
                         st.success("**Disponível**")
@@ -290,7 +291,7 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
         else:
             st.info("Nenhum volante cadastrado.")
 
-    # [ADICIONADO] Aba do Gráfico
+    # Aba do Gráfico
     with tab_hist:
         try:
             df_hist = conn.query('SELECT * FROM "HistoricoVolantes" ORDER BY "DataRegistro" ASC')
@@ -411,7 +412,7 @@ def exibir_metricas_topo(df, conn, df_volantes, df_unidades_list, df_cargos_list
             st.metric("🚙 Volantes", "0")
             
         if st.button("Gerenciar Volantes"):
-            # [ADICIONADO] Garante que registra o uso atual ao abrir
+            # Garante que registra o uso atual ao abrir
             registrar_historico_uso(conn)
             
             modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list)
