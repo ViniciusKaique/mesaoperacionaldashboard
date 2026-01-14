@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
@@ -8,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==============================================================================
 st.set_page_config(page_title="HCM - Apurador Turbo", layout="wide", page_icon="🚀")
 
-# CSS Ajustado
 st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { font-size: 1.4rem; }
@@ -23,7 +23,7 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# --- CARREGAR CREDENCIAIS (IGUAL AO DIAGNOSTICO_PONTO.py) ---
+# Carrega secrets
 try:
     SECRETS_PG = st.secrets["api_portal_gestor"]
     PG_TOKEN = SECRETS_PG["token_fixo"]
@@ -34,58 +34,43 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. FUNÇÕES DE API (BASEADAS NO DIAGNOSTICO)
+# 3. FUNÇÕES DE API
 # ==============================================================================
 
 def get_headers():
     return {
-        "OAuth-Token": PG_TOKEN, 
-        "OAuth-Cdoperador": PG_CD_OPERADOR, 
-        "OAuth-Nrorg": PG_NR_ORG, 
         "User-Agent": "Mozilla/5.0",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "OAuth-Token": PG_TOKEN,
+        "OAuth-Cdoperador": PG_CD_OPERADOR,
+        "OAuth-Nrorg": PG_NR_ORG
     }
 
 @st.cache_data(ttl=3600) 
 def fetch_periodos_apuracao():
-    """ 
-    Cópia EXATA da função do DIAGNOSTICO_PONTO.py 
-    """
+    """ Busca lista de períodos para o selectbox """
     url = "https://portalgestor.teknisa.com/backend/index.php/getPeriodosDemonstrativo"
-    params = { 
-        "requestType": "FilterData", 
-        "NRORG": PG_NR_ORG, 
-        "CDOPERADOR": PG_CD_OPERADOR 
-    }
-    # Headers explícitos igual ao arquivo de referência
-    headers = { 
-        "OAuth-Token": PG_TOKEN, 
-        "OAuth-Cdoperador": PG_CD_OPERADOR, 
-        "OAuth-Nrorg": PG_NR_ORG, 
-        "User-Agent": "Mozilla/5.0" 
-    }
-    
+    params = { "requestType": "FilterData", "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR }
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = requests.get(url, params=params, headers=get_headers(), timeout=10)
         if r.status_code == 200:
             data = r.json()
             if "dataset" in data and "data" in data["dataset"]:
                 return pd.DataFrame(data["dataset"]["data"])
-    except Exception as e:
-        print(f"Erro ao buscar períodos: {e}")
-        pass
+    except: pass
     return pd.DataFrame()
 
-def buscar_vinculos_para_apuracao(nr_periodo, nr_estrut):
+def buscar_quadro_mesa_operacional(data_ref, nr_estrut):
     """
-    Busca Vínculos. 
-    DIFERENÇA: Usa getVinculosDoGestor (necessário p/ apuração) em vez de getMesaOperacoes.
-    SEM FILTROS: Traz todo mundo independente da situação.
+    CÓPIA EXATA DA LÓGICA DO DIAGNOSTICO_PONTO.PY
+    Rota: getMesaOperacoes
     """
-    url = "https://portalgestor.teknisa.com/backend/index.php/getVinculosDoGestor"
+    url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
+    
+    # Parâmetros iguais ao arquivo de referência 
     params = {
         "requestType": "FilterData",
-        "NRPERIODOAPURACAO": nr_periodo,
+        "DIA": data_ref.strftime("%d/%m/%Y"), # Exige data formatada
         "NRESTRUTURAM": nr_estrut,
         "NRORG": PG_NR_ORG,
         "CDOPERADOR": PG_CD_OPERADOR
@@ -93,30 +78,23 @@ def buscar_vinculos_para_apuracao(nr_periodo, nr_estrut):
     
     try:
         r = requests.get(url, params=params, headers=get_headers(), timeout=30)
-        
         if r.status_code == 200:
             data = r.json()
-            dataset = data.get("dataset", {})
-            
-            lista = []
-            # Tenta encontrar a lista onde quer que ela esteja no JSON
-            if isinstance(dataset, dict):
-                if "getVinculosDoGestor" in dataset:
-                    lista = dataset["getVinculosDoGestor"]
-                elif "data" in dataset:
-                    lista = dataset["data"]
-            elif isinstance(dataset, list):
-                lista = dataset
-
-            # Retorna a lista crua, sem filtrar 'Atividade Normal'
-            return lista if lista else []
-            
+            # Parser igual ao Diagnóstico 
+            if "dataset" in data and "data" in data["dataset"]:
+                lista = data["dataset"]["data"]
+                
+                # AQUI ESTÁ A DIFERENÇA: 
+                # O Diagnóstico faz: df = df[df['NMSITUFUNCH'] == 'Atividade Normal']
+                # Nós retornamos TUDO sem filtrar.
+                return lista
+            else:
+                st.error("Estrutura do JSON inesperada (dataset.data não encontrado).")
     except Exception as e:
-        st.error(f"Erro técnico na busca: {e}")
+        st.error(f"Erro ao buscar Mesa Operacional: {e}")
     return []
 
 def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo):
-    """ Executa a apuração """
     endpoint = f"{url_base}/apurarPeriodo"
     payload = {
         "requestType": "Row",
@@ -133,14 +111,12 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
         
         if r.status_code == 200:
             resp = r.json()
-            # Caminho seguro para ler o flag de sucesso
             dados = resp.get("dataset", {}).get("data", {}).get("apurarPeriodo", {})
-            
             if dados.get("apurado") is True:
                 return "SUCESSO", "Apuração Realizada", ""
             else:
                 infos = resp.get("dataset", {}).get("data", {}).get("info", [])
-                return "FALHA_LOGICA", "Não apurado (Flag False)", str(infos)
+                return "FALHA_LOGICA", "Não apurado", str(infos)
 
         elif r.status_code == 500:
             try:
@@ -157,59 +133,56 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
         return "CRITICO", "Erro Python", str(e)
 
 # ==============================================================================
-# 4. INTERFACE E CONTROLES (MOLDE DIAGNOSTICO)
+# 4. INTERFACE
 # ==============================================================================
 
-st.title("🚀 Apurador Turbo (Massa)")
+st.title("🚀 Apurador Turbo (Via Mesa Operacional)")
 
 if "lista_funcionarios" not in st.session_state:
     st.session_state["lista_funcionarios"] = []
 if "resultado_apuracao" not in st.session_state:
     st.session_state["resultado_apuracao"] = []
 
-# --- SIDEBAR IGUAL AO DIAGNOSTICO ---
 with st.sidebar:
     st.header("Parâmetros")
     
-    # 1. Busca e Lista Períodos
-    df_periodos = fetch_periodos_apuracao()
+    # 1. DATA DE REFERÊNCIA (Necessário para getMesaOperacoes)
+    data_ref = st.date_input("Data Referência (Para buscar o quadro)", datetime.now())
+    st.caption("Esta data é usada apenas para listar quem pertence ao gestor.")
     
+    st.divider()
+
+    # 2. PERÍODO DE APURAÇÃO (Para executar a ação)
+    df_periodos = fetch_periodos_apuracao()
     if not df_periodos.empty:
-        # Lógica do Diagnóstico: Selectbox com nome e código oculto
-        periodos_dict = dict(zip(df_periodos['DSPERIODOAPURACAO'], df_periodos['NRPERIODOAPURACAO']))
-        opcao = st.selectbox("Selecione o Período:", list(periodos_dict.keys()))
-        nr_periodo = periodos_dict[opcao] # Pega o ID correspondente
+        periodo_fmt = df_periodos.apply(lambda x: f"{x['DSPERIODOAPURACAO']} (Cód: {x['NRPERIODOAPURACAO']})", axis=1)
+        opcao = st.selectbox("Selecione o Período de Apuração:", periodo_fmt)
+        idx = periodo_fmt[periodo_fmt == opcao].index[0]
+        nr_periodo = df_periodos.iloc[idx]['NRPERIODOAPURACAO']
     else:
-        # Fallback se a API falhar (exibe erro visual para ajudar)
-        st.error("⚠️ Não foi possível carregar a lista de períodos.")
-        nr_periodo = st.text_input("Período Apuração (Cód. Manual)", value="1904")
+        nr_periodo = st.text_input("Período Apuração (Cód)", value="1904")
     
     st.divider()
     
-    # Outros inputs
     nr_estrutura = st.text_input("Estrutura (NRESTRUTURAM)", value="101091998")
     threads = st.slider("Velocidade (Threads)", 1, 10, 5)
     
     st.divider()
     
-    if st.button("🔄 Carregar Lista do Quadro", use_container_width=True):
+    if st.button("🔄 Carregar Lista (Mesa)", use_container_width=True):
         st.session_state["lista_funcionarios"] = []
         st.session_state["resultado_apuracao"] = []
         
-        with st.spinner(f"Buscando lista completa (Período {nr_periodo})..."):
-            res = buscar_vinculos_para_apuracao(nr_periodo, nr_estrutura)
+        # Chama a função idêntica ao Diagnóstico
+        with st.spinner(f"Buscando quadro em {data_ref.strftime('%d/%m/%Y')}..."):
+            res = buscar_quadro_mesa_operacional(data_ref, nr_estrutura)
             st.session_state["lista_funcionarios"] = res
             
             if not res:
-                st.error("Nenhum registro encontrado.")
-                st.markdown("""
-                **Possíveis causas:**
-                1. Token/Operador incorretos no `secrets.toml`.
-                2. Código da Estrutura errado.
-                3. Período selecionado não tem funcionários vinculados a este gestor.
-                """)
+                st.error("Nenhum registro encontrado na Mesa Operacional.")
+                st.info("Verifique Data e Estrutura.")
             else:
-                st.success(f"Encontrados: {len(res)} funcionários (Ativos e Inativos)")
+                st.success(f"Encontrados: {len(res)} funcionários.")
 
 # ==============================================================================
 # 5. EXECUÇÃO
@@ -218,19 +191,18 @@ with st.sidebar:
 if st.session_state["lista_funcionarios"]:
     df_lista = pd.DataFrame(st.session_state["lista_funcionarios"])
     
-    # Mostra tabela simples
-    with st.expander(f"📋 Visualizar Lista ({len(df_lista)} vínculos)", expanded=False):
+    with st.expander(f"📋 Lista Carregada ({len(df_lista)} vínculos)", expanded=False):
         cols_possiveis = ['NRVINCULOM', 'NMVINCULOM', 'NMSITUFUNCH', 'NMFUNCAO']
         cols_show = [c for c in cols_possiveis if c in df_lista.columns]
         st.dataframe(df_lista[cols_show] if cols_show else df_lista, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     
-    if st.button("🔥 DISPARAR APURAÇÃO EM MASSA", type="primary", use_container_width=True):
+    if st.button("🔥 DISPARAR APURAÇÃO", type="primary", use_container_width=True):
         
         session = requests.Session()
         url_base = "https://portalgestor.teknisa.com/backend/index.php"
-        headers = get_headers() # Usa mesmos headers da busca
+        headers = get_headers()
         
         total_items = len(df_lista)
         results = []
@@ -239,7 +211,6 @@ if st.session_state["lista_funcionarios"]:
         status_text = st.empty()
         suc, blk, err = 0, 0, 0
         
-        # Execução Paralela
         with ThreadPoolExecutor(max_workers=threads) as executor:
             futures = {
                 executor.submit(
@@ -263,8 +234,7 @@ if st.session_state["lista_funcionarios"]:
                     "Nome": row.get('NMVINCULOM', 'Desconhecido'),
                     "Situação": row.get('NMSITUFUNCH', '-'),
                     "Status": status_cod,
-                    "Mensagem": msg,
-                    "Detalhes": det
+                    "Mensagem": msg
                 })
                 
                 prog_bar.progress(i / total_items)
@@ -281,7 +251,7 @@ if st.session_state["lista_funcionarios"]:
 if st.session_state["resultado_apuracao"]:
     df_res = pd.DataFrame(st.session_state["resultado_apuracao"])
     
-    tab1, tab2, tab3 = st.tabs(["📊 Geral", "⛔ Bloqueios/Erros", "✅ Sucesso"])
+    tab1, tab2, tab3 = st.tabs(["📊 Geral", "⛔ Erros", "✅ Sucesso"])
     
     with tab1:
         st.dataframe(df_res, use_container_width=True, hide_index=True, selection_mode="single-row")
@@ -290,10 +260,7 @@ if st.session_state["resultado_apuracao"]:
         
     with tab2:
         df_err = df_res[df_res['Status'] != 'SUCESSO']
-        if df_err.empty:
-            st.info("Nenhum erro encontrado.")
-        else:
-            st.dataframe(df_err, use_container_width=True, hide_index=True)
+        st.dataframe(df_err, use_container_width=True, hide_index=True)
             
     with tab3:
         df_suc = df_res[df_res['Status'] == 'SUCESSO']
