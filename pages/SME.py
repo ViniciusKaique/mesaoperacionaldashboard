@@ -62,8 +62,6 @@ HEADERS_CHROME = {
 # ==============================================================================
 # 4. FUNÇÕES DE LÓGICA DE NEGÓCIO (GLOBAIS)
 # ==============================================================================
-# Movemos para cá para poder reutilizar no "Auto-Patch" caso o session_state esteja velho
-
 def definir_status_resposta(row):
     if 'ocorrenciaRespondida' in row.index:
         val = str(row['ocorrenciaRespondida']).lower()
@@ -84,9 +82,9 @@ def definir_solucao(row):
         
     # Se está encerrado, verifica se tem desconto (glosa)
     if gerar_desconto:
-        return '💰 Gerou Glosa' # Encerrado, mas com falha
+        return '💰 Gerou Glosa' 
     else:
-        return '🌟 Solucionado' # Encerrado com sucesso
+        return '🌟 Solucionado' 
 
 def cat_visual(val):
     v = str(val).lower()
@@ -344,15 +342,12 @@ if st.sidebar.button("🔄 Buscar Ocorrências", use_container_width=True):
 st.title("🔔 Monitoramento de Ocorrências")
 df = st.session_state['ocorrencias_df']
 
-# --------------------------------------------------------------------------
 # FIX PARA O ERRO KEYERROR:
-# Se o DF existe na memória (cache), mas a coluna nova não, cria ela agora.
-# --------------------------------------------------------------------------
 if df is not None and not df.empty:
     if 'Status_Solucao' not in df.columns:
         st.toast("Atualizando estrutura de dados...", icon="🔧")
         df['Status_Solucao'] = df.apply(definir_solucao, axis=1)
-        st.session_state['ocorrencias_df'] = df # Atualiza o cache
+        st.session_state['ocorrencias_df'] = df
 
 if df is not None and not df.empty:
     # Filtro de Data
@@ -367,7 +362,16 @@ if df is not None and not df.empty:
 
     st.caption(f"Período: **{d_ini.strftime('%d/%m')}** a **{d_fim.strftime('%d/%m')}** | Total: {len(df_v)}")
     
-    # KPIs
+    # --------------------------------------------------------------------------
+    # BLOCO DE KPIs ATUALIZADO (2 NÍVEIS)
+    # --------------------------------------------------------------------------
+    
+    # 1. KPIs de Comunicação
+    qtd_total = len(df_v)
+    qtd_respondidas = len(df_v[df_v['Status_Resposta'] == '✅ Respondido'])
+    qtd_sem_resposta = len(df_v[df_v['Status_Resposta'] == '🚨 Sem Resposta'])
+
+    # 2. KPIs de Solução Financeira/Técnica
     qtd_solucionado = len(df_v[df_v['Status_Solucao'] == '🌟 Solucionado'])
     qtd_glosa = len(df_v[df_v['Status_Solucao'] == '💰 Gerou Glosa'])
     qtd_aguardando = len(df_v[df_v['Status_Solucao'] == '⏳ Aguardando Parecer'])
@@ -376,13 +380,24 @@ if df is not None and not df.empty:
     if total_encerrados > 0:
         indice_solucao = (qtd_solucionado / total_encerrados) * 100
     else:
-        indice_solucao = 0
+        indice_solucao = 0.0
 
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total", len(df_v))
-    k2.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Calculado sobre chamados encerrados.")
-    k3.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
-    k4.metric("⏳ Aguardando", qtd_aguardando)
+    # Layout Visual
+    st.markdown("### 📡 Status de Comunicação")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total", qtd_total)
+    k2.metric("✅ Respondidas", qtd_respondidas)
+    k3.metric("🚨 Sem Resposta", qtd_sem_resposta, delta_color="inverse")
+    
+    st.divider()
+
+    st.markdown("### 💰 Status de Solução")
+    k4, k5, k6, k7 = st.columns(4)
+    k4.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
+    k5.metric("🌟 Solucionado", qtd_solucionado)
+    k6.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Solucionado / (Solucionado + Glosa)")
+    k7.metric("⏳ Aguardando", qtd_aguardando)
+    
     st.divider()
 
     # Gráficos Gerais
