@@ -154,7 +154,7 @@ def fetch_ids_portal_gestor(data_ref):
         st.error(f"Erro Portal Gestor: {e}")
     return pd.DataFrame()
 
-@st.cache_data(ttl=3600) # Cache de 1 hora para não ficar chamando toda hora
+@st.cache_data(ttl=3600) 
 def fetch_periodos_apuracao():
     """Busca a lista de períodos disponíveis no endpoint getPeriodosDemonstrativo"""
     url = "https://portalgestor.teknisa.com/backend/index.php/getPeriodosDemonstrativo"
@@ -247,21 +247,15 @@ with st.sidebar:
     competencia_sugerida = datetime.now().replace(day=1).strftime("%d/%m/%Y")
     
     if not df_periodos.empty:
-        # Cria label amigável: "1905 | 16/01/2026 - 15/02/2026 (ABERTO)"
-        df_periodos['Label'] = (
-            df_periodos['NRPERIODOAPURACAO'].astype(str) + " | " + 
-            df_periodos['DSPERIODOAPURACAO']
-        )
+        # --- ALTERAÇÃO AQUI: Usa apenas a descrição no visual ---
+        opcao = st.selectbox("Selecione o Período:", df_periodos['DSPERIODOAPURACAO'])
         
-        # Selectbox
-        opcao = st.selectbox("Selecione o Período:", df_periodos['Label'])
-        
-        # Extrai os dados da seleção
-        row_sel = df_periodos[df_periodos['Label'] == opcao].iloc[0]
+        # Recupera o ID (Código) correspondente à descrição selecionada
+        # Filtra o dataframe para achar a linha onde a descrição bate
+        row_sel = df_periodos[df_periodos['DSPERIODOAPURACAO'] == opcao].iloc[0]
         periodo_apuracao = row_sel['NRPERIODOAPURACAO']
         
         # Tenta calcular a competência sugerida baseada na data inicial do período
-        # Se começa em 16/01, competência é 01/01. Se começa 01/01, é 01/01.
         try:
             dt_ini_str = row_sel['DTINICIALAPURACAO'] # ex: 16/01/2026
             dt_ini = datetime.strptime(dt_ini_str, "%d/%m/%Y")
@@ -278,7 +272,8 @@ with st.sidebar:
     data_ref = st.date_input("Data Ref. (Para Lista de Ativos)", datetime.now())
     
     st.divider()
-    btn_buscar = st.button("🚀 Disparar Análise", type="primary", use_container_width=True)
+    # --- ALTERAÇÃO AQUI: Removeu o type="primary" ---
+    btn_buscar = st.button("🚀 Disparar Análise", use_container_width=True)
 
 if btn_buscar:
     # 1. BUSCA IDs NO PORTAL GESTOR
@@ -301,7 +296,7 @@ if btn_buscar:
             st.stop()
             
         # 3. BUSCA OCORRÊNCIAS (SINGLE SHOT)
-        status.write(f"⚡ Consultando Período **{periodo_apuracao}** no HCM...")
+        status.write(f"⚡ Consultando Período ID {periodo_apuracao} no HCM...")
         df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
         
         status.update(label="Sucesso!", state="complete", expanded=False)
