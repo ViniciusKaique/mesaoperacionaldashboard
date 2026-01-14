@@ -17,7 +17,7 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# --- CARREGAR CREDENCIAIS (COM TRATAMENTO DE ERRO) ---
+# --- CARREGAR CREDENCIAIS ---
 try:
     SECRETS_HCM = st.secrets["hcm_api"]
     HCM_USER = SECRETS_HCM["usuario"]
@@ -275,6 +275,12 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
 st.title("⚡ Relatório Turbo - Faltas e Atrasos (HCM)")
 st.markdown("**Modo Otimizado:** Ignora ocorrências do dia vigente.")
 
+# --- INICIALIZAÇÃO DO ESTADO DE BUSCA ---
+if "busca_realizada" not in st.session_state:
+    st.session_state["busca_realizada"] = False
+if "dados_cache" not in st.session_state:
+    st.session_state["dados_cache"] = {}
+
 with st.sidebar:
     st.header("Parâmetros")
     
@@ -297,31 +303,55 @@ with st.sidebar:
     data_ref = st.date_input("Data Ref. (Para Lista de Ativos)", datetime.now())
     
     st.divider()
-    btn_buscar = st.button("🚀 Disparar Análise", use_container_width=True)
+    
+    # BOTÃO QUE ATIVA A BUSCA
+    if st.button("🚀 Disparar Análise", use_container_width=True):
+        st.session_state["busca_realizada"] = True
+        st.rerun()
 
-if btn_buscar:
-    with st.status("🔄 Analisando...", expanded=True) as status:
-        # 1. LISTA DE ATIVOS
-        status.write("Buscando funcionários ativos...")
-        df_funcionarios = fetch_ids_portal_gestor(data_ref)
-        if df_funcionarios.empty:
-            status.update(label="❌ Lista vazia.", state="error"); st.stop()
+# --- EXECUÇÃO DA BUSCA (SE ESTIVER ATIVA) ---
+if st.session_state["busca_realizada"]:
+    
+    # Se ainda não temos os dados no cache ou se foi uma nova busca, carrega
+    if not st.session_state["dados_cache"]:
+        with st.status("🔄 Analisando...", expanded=True) as status:
+            # 1. LISTA DE ATIVOS
+            status.write("Buscando funcionários ativos...")
+            df_funcionarios = fetch_ids_portal_gestor(data_ref)
+            if df_funcionarios.empty:
+                status.update(label="❌ Lista vazia.", state="error")
+                st.session_state["busca_realizada"] = False
+                st.stop()
+                
+            lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
             
-        lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
-        
-        # Cria mapas para referência
-        df_funcionarios['NRVINCULOM'] = df_funcionarios['NRVINCULOM'].astype(str)
-        mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMVINCULOM']))
-        mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMESTRUTGEREN']))
-        
-        # 2. HCM
-        status.write("Consultando ocorrências no HCM...")
-        token_hcm = obter_sessao_hcm()
-        if not token_hcm:
-            status.update(label="❌ Falha login HCM.", state="error"); st.stop()
+            # 2. HCM
+            status.write("Consultando ocorrências no HCM...")
+            token_hcm = obter_sessao_hcm()
+            if not token_hcm:
+                status.update(label="❌ Falha login HCM.", state="error")
+                st.session_state["busca_realizada"] = False
+                st.stop()
+                
+            df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
             
-        df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
-        status.update(label="Sucesso!", state="complete", expanded=False)
+            # SALVA NO CACHE DE SESSÃO
+            st.session_state["dados_cache"] = {
+                "funcionarios": df_funcionarios,
+                "ocorrencias": df_ocorrencias,
+                "periodo_apuracao": periodo_apuracao
+            }
+            status.update(label="Sucesso!", state="complete", expanded=False)
+
+    # RECUPERA DADOS DO CACHE
+    df_funcionarios = st.session_state["dados_cache"]["funcionarios"]
+    df_ocorrencias = st.session_state["dados_cache"]["ocorrencias"]
+    periodo_apuracao = st.session_state["dados_cache"]["periodo_apuracao"]
+
+    # Cria mapas para referência
+    df_funcionarios['NRVINCULOM'] = df_funcionarios['NRVINCULOM'].astype(str)
+    mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMVINCULOM']))
+    mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMESTRUTGEREN']))
 
     # --- PROCESSAMENTO DOS DADOS ---
     hoje_str = datetime.now().strftime('%Y-%m-%d')
