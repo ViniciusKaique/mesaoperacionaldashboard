@@ -383,7 +383,7 @@ if df is not None and not df.empty:
         indice_solucao = 0.0
 
     # Layout Visual
-    st.markdown("### 📡 Status de Comunicação")
+    st.markdown("### Ocorrências")
     k1, k2, k3 = st.columns(3)
     k1.metric("Total", qtd_total)
     k2.metric("✅ Respondidas", qtd_respondidas)
@@ -391,7 +391,7 @@ if df is not None and not df.empty:
     
     st.divider()
 
-    st.markdown("### 💰 Status de Solução")
+    st.markdown("### Status de Solução")
     k4, k5, k6, k7 = st.columns(4)
     k4.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
     k5.metric("🌟 Solucionado", qtd_solucionado)
