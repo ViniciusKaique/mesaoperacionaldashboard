@@ -203,7 +203,6 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
 
 def decimal_para_hora(val):
     try:
-        if pd.isna(val) or val == 0: return "00:00"
         horas = int(val)
         minutos = int((val - horas) * 60)
         return f"{horas:02d}:{minutos:02d}"
@@ -271,11 +270,8 @@ if btn_buscar:
     ocorrencias_filtradas = pd.DataFrame()
     
     if not df_ocorrencias.empty:
-        # Padroniza string de data para filtro
+        # Remove ocorrências onde DATA_INICIO_FILTER == Hoje
         df_ocorrencias['DATA_INICIO_FILTER'] = df_ocorrencias['DATA_INICIO_FILTER'].astype(str)
-        # Padroniza tipo de ocorrencia para evitar erro de espaco
-        df_ocorrencias['TIPO_OCORRENCIA'] = df_ocorrencias['TIPO_OCORRENCIA'].str.strip().str.upper()
-        
         qtd_antes = len(df_ocorrencias)
         ocorrencias_filtradas = df_ocorrencias[df_ocorrencias['DATA_INICIO_FILTER'] != hoje_str].copy()
         qtd_depois = len(ocorrencias_filtradas)
@@ -283,47 +279,29 @@ if btn_buscar:
         if qtd_antes > qtd_depois:
             st.toast(f"ℹ️ {qtd_antes - qtd_depois} ocorrências de hoje ({hoje_str}) foram ignoradas.")
     
-    # 2. SEPARAÇÃO E CÁLCULOS (ESTRATÉGIA DE ISOLAMENTO TOTAL)
+    # 2. SEPARAÇÃO E CÁLCULOS
     if ocorrencias_filtradas.empty:
         st.success("🎉 Nenhuma falta ou atraso encontrado (exceto hoje)!")
     else:
-        # Garante numérico e strings
         ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
         ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
+        
+        # Garante nomes atualizados do Portal
         ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
         ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
         
-        # ======================================================================
-        # LÓGICA DE SEPARAÇÃO BLINDADA
-        # ======================================================================
+        # AGRUPAMENTO GERAL
+        resumo = ocorrencias_filtradas.groupby(['NRVINCULOM', 'Funcionario', 'Escola']).agg(
+            Qtd_Faltas=('TIPO_OCORRENCIA', lambda x: (x == 'FALTA').sum()),
+            Total_Horas_Atraso=('DIFF_HOURS', lambda x: x[ocorrencias_filtradas.loc[x.index, 'TIPO_OCORRENCIA'] == 'ATRASO'].sum()),
+            Datas=('DATA_INICIO', lambda x: ", ".join(sorted(x.unique())))
+        ).reset_index()
         
-        # A) ISOLAR DATAFRAME APENAS DE FALTAS
-        df_only_faltas = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].copy()
-        # Remove duplicidade de DIA para não contar falta picada
-        df_only_faltas_dedup = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO'])
-        # Conta
-        s_faltas = df_only_faltas_dedup.groupby('NRVINCULOM').size().rename('Qtd_Faltas')
-        
-        # B) ISOLAR DATAFRAME APENAS DE ATRASOS
-        df_only_atrasos = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
-        # Soma (Aqui NÃO removemos duplicatas pois queremos acumular horas)
-        s_atrasos = df_only_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
-        
-        # C) DATAS (União visual das datas de ambos)
-        s_datas = ocorrencias_filtradas.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
-        
-        # D) DATAFRAME BASE (Para unir tudo)
-        df_base_funcionarios = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
-        
-        # E) JOIN FINAL
-        resumo = df_base_funcionarios.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
-        
-        # Formatação
-        resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-        # 3. IDENTIFICAR "PONTO EXCELENTE" (Quem não está no resumo)
+        # 3. IDENTIFICAR "SEM OCORRÊNCIAS"
         ids_com_problema = set(resumo['NRVINCULOM'].unique())
+        # Filtra do DF original quem não está na lista de problemas
         df_sem_ocorrencias = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
         df_sem_ocorrencias = df_sem_ocorrencias[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(
             columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'}
@@ -332,36 +310,36 @@ if btn_buscar:
         # --- EXIBIÇÃO ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Analisado", len(df_funcionarios))
-        k2.metric("✅ Ponto Excelente", len(df_sem_ocorrencias), delta_color="normal")
+        k2.metric("Sem Ocorrências", len(df_sem_ocorrencias), delta_color="normal")
         k3.metric("Com Faltas/Atrasos", len(resumo), delta_color="inverse")
-        k4.metric("Faltas Totais (Dias)", resumo['Qtd_Faltas'].sum())
+        k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
         
         st.divider()
         
-        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
+        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Sem Ocorrências", "📋 Base Completa"])
         
         with tab1:
             st.subheader("Quem mais faltou no período")
-            df_faltas_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+            df_faltas = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
             st.dataframe(
-                df_faltas_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
+                df_faltas[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
                 use_container_width=True,
                 hide_index=True,
-                column_config={"Qtd_Faltas": st.column_config.NumberColumn("Qtd. Dias Falta", format="%d ❌")}
+                column_config={"Qtd_Faltas": st.column_config.NumberColumn("Qtd. Faltas", format="%d ❌")}
             )
             
         with tab2:
             st.subheader("Quem tem mais horas de atraso")
-            df_atrasos_show = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+            df_atrasos = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
             st.dataframe(
-                df_atrasos_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
+                df_atrasos[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
                 use_container_width=True,
                 hide_index=True,
                 column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
             )
             
         with tab3:
-            st.subheader(f"✅ Ponto Excelente ({len(df_sem_ocorrencias)})")
+            st.subheader(f"Funcionários Zero Defeitos ({len(df_sem_ocorrencias)})")
             st.caption("Colaboradores ativos sem nenhuma falta ou atraso registrado no período (descontando hoje).")
             st.dataframe(df_sem_ocorrencias, use_container_width=True, hide_index=True)
             
