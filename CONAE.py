@@ -10,8 +10,6 @@ from datetime import date
 # ==============================================================================
 # CONFIGURAÇÕES E CONSTANTES
 # ==============================================================================
-ID_VOLANTES = 101092601 # ID da Unidade de Volantes
-
 def configurar_pagina():
     st.set_page_config(page_title="Mesa Operacional", layout="wide", page_icon="📊")
     st.markdown("""
@@ -70,13 +68,17 @@ def buscar_dados_auxiliares(_conn):
 
 @st.cache_data(ttl=60, show_spinner=False) 
 def buscar_dados_operacionais(_conn):
-    # --- QUERY ORIGINAL DO QUADRO ---
+    # --- 1. QUERY QUADRO (EDITAL VS REAL) ---
+    # AJUSTE: O LEFT JOIN com ColaboradoresVolantes + WHERE v."ColaboradorID" IS NULL
+    # garante que volantes NÃO sejam contados no 'QtdReal'
     query_resumo = """
     WITH ContagemReal AS (
-        SELECT "UnidadeID", "CargoID", COUNT(*) as "QtdReal"
-        FROM "Colaboradores"
-        WHERE "Ativo" = TRUE
-        GROUP BY "UnidadeID", "CargoID"
+        SELECT c."UnidadeID", c."CargoID", COUNT(*) as "QtdReal"
+        FROM "Colaboradores" c
+        LEFT JOIN "ColaboradoresVolantes" v ON c."ColaboradorID" = v."ColaboradorID"
+        WHERE c."Ativo" = TRUE 
+          AND v."ColaboradorID" IS NULL  -- <--- ESTA LINHA EXCLUI OS VOLANTES DA CONTAGEM
+        GROUP BY c."UnidadeID", c."CargoID"
     )
     SELECT 
         t."NomeTipo" AS "Tipo", 
@@ -97,22 +99,40 @@ def buscar_dados_operacionais(_conn):
     ORDER BY u."NomeUnidade", c."NomeCargo";
     """
     
-    # --- QUERY FUNCIONÁRIOS ---
+    # --- 2. QUERY FUNCIONÁRIOS (LISTAGEM) ---
+    # AJUSTE: Também excluímos eles da lista visual das escolas
     query_funcionarios = """
     SELECT u."UnidadeID", u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
     FROM "Colaboradores" col
     JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
     JOIN "Cargos" c ON col."CargoID" = c."CargoID"
-    WHERE col."Ativo" = TRUE
+    LEFT JOIN "ColaboradoresVolantes" v ON col."ColaboradorID" = v."ColaboradorID"
+    WHERE col."Ativo" = TRUE 
+      AND v."ColaboradorID" IS NULL -- <--- VOLANTES NÃO APARECEM NA LISTA DA ESCOLA
     ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
     """
 
-    # --- QUERY ALOCAÇÕES ---
+    # --- 3. QUERY ALOCAÇÕES ---
     query_alocacoes = """
     SELECT av."ColaboradorID" AS "ID", av."UnidadeDestinoID", u."NomeUnidade" AS "EscolaDestino"
     FROM "AlocacaoVolantes" av
     JOIN "Unidades" u ON av."UnidadeDestinoID" = u."UnidadeID"
     WHERE av."DataAlocacao" = CURRENT_DATE
+    """
+
+    # --- 4. QUERY BASES DE VOLANTES (Para o Modal de Gestão) ---
+    # Aqui trazemos APENAS os volantes
+    query_volantes_base = """
+    SELECT 
+        cv."ColaboradorID" AS "ID", 
+        u."NomeUnidade" AS "BaseOriginal",
+        col."Nome" AS "Funcionario",
+        c."NomeCargo" AS "Cargo"
+    FROM "ColaboradoresVolantes" cv
+    JOIN "Unidades" u ON cv."UnidadeBaseID" = u."UnidadeID"
+    JOIN "Colaboradores" col ON cv."ColaboradorID" = col."ColaboradorID"
+    JOIN "Cargos" c ON col."CargoID" = c."CargoID"
+    WHERE col."Ativo" = TRUE
     """
 
     df_resumo = _conn.query(query_resumo)
@@ -123,11 +143,16 @@ def buscar_dados_operacionais(_conn):
     except:
         df_alocacoes = pd.DataFrame(columns=["ID", "UnidadeDestinoID", "EscolaDestino"])
 
-    # --- PROCESSAMENTO ---
-    df_volantes_base = df_pessoas[df_pessoas['UnidadeID'] == ID_VOLANTES].copy()
-    
-    if not df_volantes_base.empty:
-        df_volantes_status = pd.merge(df_volantes_base, df_alocacoes, on="ID", how="left")
+    try:
+        df_volantes_info = _conn.query(query_volantes_base)
+    except:
+        df_volantes_info = pd.DataFrame(columns=["ID", "BaseOriginal", "Funcionario", "Cargo"])
+
+    # --- PROCESSAMENTO DOS VOLANTES ---
+    if not df_volantes_info.empty:
+        # Junta com o Status de Alocação (Se está cobrindo alguém hoje)
+        df_volantes_status = pd.merge(df_volantes_info, df_alocacoes, on="ID", how="left")
+        
         df_volantes_status['Status_Texto'] = np.where(df_volantes_status['UnidadeDestinoID'].notnull(), 
                                                       "Cobrindo: " + df_volantes_status['EscolaDestino'].fillna(''), 
                                                       "Disponível")
@@ -135,9 +160,7 @@ def buscar_dados_operacionais(_conn):
     else:
         df_volantes_status = pd.DataFrame()
 
-    df_resumo = df_resumo[df_resumo['UnidadeID'] != ID_VOLANTES]
-    df_pessoas = df_pessoas[df_pessoas['UnidadeID'] != ID_VOLANTES]
-
+    # Processamento do Resumo Geral
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     df_resumo['Status_Codigo'] = np.select(condicoes, ['FALTA', 'EXCEDENTE'], default='OK')
     df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
@@ -167,13 +190,13 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
 def registrar_historico_uso(conn):
     """Calcula e salva o % de uso dos volantes na data de hoje."""
     try:
-        # 1. Conta Total de Volantes (Pessoas na unidade Volantes)
-        q_total = text('SELECT COUNT(*) FROM "Colaboradores" WHERE "UnidadeID" = :uid AND "Ativo" = TRUE')
+        # 1. Conta Total de Volantes (Baseado na nova tabela)
+        q_total = text('SELECT COUNT(*) FROM "ColaboradoresVolantes"')
         # 2. Conta Alocados Hoje
         q_aloc = text('SELECT COUNT(*) FROM "AlocacaoVolantes" WHERE "DataAlocacao" = CURRENT_DATE')
         
         with conn.session as s:
-            total = s.execute(q_total, {'uid': ID_VOLANTES}).scalar()
+            total = s.execute(q_total).scalar()
             alocados = s.execute(q_aloc).scalar()
             
             if total > 0:
@@ -181,7 +204,6 @@ def registrar_historico_uso(conn):
             else:
                 pct = 0.0
             
-            # Upsert (Insere ou Atualiza se já existir hoje)
             s.execute(text("""
                 INSERT INTO "HistoricoVolantes" ("DataRegistro", "TotalVolantes", "QtdAlocados", "PercentualUso")
                 VALUES (CURRENT_DATE, :t, :a, :p)
@@ -204,7 +226,6 @@ def acao_alocar_volante(colab_id, unidade_destino_id, conn):
                       {'cid': colab_id, 'uid': unidade_destino_id})
             s.commit()
         
-        # Atualiza histórico
         registrar_historico_uso(conn)
 
         st.cache_data.clear()
@@ -219,7 +240,6 @@ def acao_desalocar_volante(colab_id, conn):
             s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "ColaboradorID" = :id AND "DataAlocacao" = CURRENT_DATE'), {'id': colab_id})
             s.commit()
         
-        # Atualiza histórico
         registrar_historico_uso(conn)
         
         st.cache_data.clear()
@@ -234,7 +254,6 @@ def acao_desalocar_volante(colab_id, conn):
 @st.dialog("🚙 Gestão de Volantes (Diário)", width="large")
 def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
     
-    # Abas para separar Operação do Histórico
     tab_op, tab_hist = st.tabs(["🛠️ Operação Hoje", "📈 Histórico de Uso"])
 
     with tab_op:
@@ -252,9 +271,12 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
             st.divider()
 
             st.dataframe(
-                df_volantes[['Status_Icon', 'Funcionario', 'Cargo', 'Status_Texto']], 
+                df_volantes[['Status_Icon', 'Funcionario', 'BaseOriginal', 'Cargo', 'Status_Texto']], 
                 use_container_width=True, hide_index=True,
-                column_config={"Status_Icon": st.column_config.TextColumn("", width="small")}
+                column_config={
+                    "Status_Icon": st.column_config.TextColumn("", width="small"),
+                    "BaseOriginal": st.column_config.TextColumn("Base (Origem)", width="medium")
+                }
             )
 
             st.subheader("🛠️ Ações")
@@ -273,7 +295,6 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                     st.write(""); st.write("") 
                     if esta_alocado:
                         st.info(f"Em: **{row['EscolaDestino']}**")
-                        # BOTÃO SEM COR (REMOVIDO type="primary")
                         if st.button("Desalocar"):
                             acao_desalocar_volante(colab_id, conn)
                     else:
@@ -281,7 +302,7 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
             
                 if not esta_alocado:
                     with st.form("form_alocacao"):
-                        st.write(f"Alocar **{nome_selecionado}** hoje para:")
+                        st.write(f"Alocar **{nome_selecionado}** (Base: {row['BaseOriginal']}) hoje para:")
                         lst_esc = df_unidades_list['NomeUnidade'].tolist()
                         destino = st.selectbox("Escolha a Escola:", lst_esc)
                         
@@ -289,9 +310,8 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                             uid_dest = int(df_unidades_list[df_unidades_list['NomeUnidade'] == destino]['UnidadeID'].iloc[0])
                             acao_alocar_volante(colab_id, uid_dest, conn)
         else:
-            st.info("Nenhum volante cadastrado.")
+            st.info("Nenhum volante cadastrado na tabela 'ColaboradoresVolantes'.")
 
-    # Aba do Gráfico
     with tab_hist:
         try:
             df_hist = conn.query('SELECT * FROM "HistoricoVolantes" ORDER BY "DataRegistro" ASC')
@@ -299,14 +319,14 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                 st.subheader("Evolução do Uso (%)")
                 fig = px.line(df_hist, x="DataRegistro", y="PercentualUso", markers=True, 
                               title="Taxa de Ocupação da Equipe de Volantes")
-                fig.update_yaxes(range=[0, 110]) # Fixa eixo y de 0 a 100+
+                fig.update_yaxes(range=[0, 110])
                 fig.add_hline(y=70, line_dash="dot", annotation_text="Meta (70%)", annotation_position="bottom right")
                 st.plotly_chart(fig, use_container_width=True)
                 
                 st.caption("Dados Brutos:")
                 st.dataframe(df_hist.sort_values("DataRegistro", ascending=False), use_container_width=True)
             else:
-                st.info("Ainda não há histórico registrado. As informações aparecerão aqui conforme o uso diário.")
+                st.info("Ainda não há histórico registrado.")
         except:
             st.warning("Tabela de histórico ainda não criada ou vazia.")
 
@@ -338,7 +358,7 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
     df_view = df_cargos_view[['Cargo','Edital','Real','Diferenca_Display','Status_Display']].rename(columns={'Diferenca_Display':'Diferenca', 'Status_Display':'Status'})
     st.dataframe(df_view, use_container_width=True, hide_index=True)
 
-    st.caption("📋 Colaboradores (Selecione para Editar)")
+    st.caption("📋 Colaboradores (Fixos)")
     if not df_pessoas_view.empty:
         event = st.dataframe(
             df_pessoas_view[['ID','Funcionario','Cargo']],
@@ -378,10 +398,10 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
                         except Exception as e:
                             st.error(f"Erro: {e}")
     else:
-        st.info("Nenhum colaborador nesta unidade.")
+        st.info("Nenhum colaborador fixo nesta unidade.")
 
 # ==============================================================================
-# COMPONENTES VISUAIS (CORRIGIDO PARA EVITAR ERRO DE DIALOG DUPLO)
+# COMPONENTES VISUAIS
 # ==============================================================================
 def exibir_sidebar(authenticator, nome_usuario):
     with st.sidebar:
@@ -400,8 +420,7 @@ def exibir_metricas_topo(df, conn, df_volantes, df_unidades_list, df_cargos_list
     with c2: st.metric("👥 Efetivo Atual", total_real)
     with c3: st.metric("⚖️ Saldo Geral", saldo, delta_color="normal")
     
-    # --- LÓGICA DE CONTROLE DO MODAL ---
-    modal_aberto_aqui = False # Flag de controle
+    modal_aberto_aqui = False 
 
     with c4:
         if not df_volantes.empty:
@@ -412,14 +431,12 @@ def exibir_metricas_topo(df, conn, df_volantes, df_unidades_list, df_cargos_list
             st.metric("🚙 Volantes", "0")
             
         if st.button("Gerenciar Volantes"):
-            # Garante que registra o uso atual ao abrir
             registrar_historico_uso(conn)
-            
             modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list)
-            modal_aberto_aqui = True # Marca que abriu
+            modal_aberto_aqui = True 
             
     st.markdown("---")
-    return modal_aberto_aqui # Retorna o status
+    return modal_aberto_aqui 
 
 def exibir_graficos_gerais(df):
     with st.expander("📈 Resumo Geral e Gráficos", expanded=True):
@@ -446,7 +463,7 @@ def exibir_graficos_gerais(df):
             )
 
 # ==============================================================================
-# MAIN (CORRIGIDO PARA EVITAR ERRO DE DIALOG DUPLO)
+# MAIN
 # ==============================================================================
 def main():
     configurar_pagina()
@@ -462,7 +479,6 @@ def main():
             
             st.title("📊 Mesa Operacional")
             
-            # 1. Executa o topo e recebe se o modal de volantes foi aberto
             volantes_aberto = exibir_metricas_topo(df_resumo, conn, df_volantes, df_unidades_list, df_cargos_list)
             
             exibir_graficos_gerais(df_resumo)
@@ -470,7 +486,6 @@ def main():
             st.markdown("---")
             st.subheader("🏫 Gestão de Escolas")
 
-            # --- FILTROS ---
             c1, c2, c3, c4, c5 = st.columns([1, 1.5, 1.2, 1, 1])
             with c1: f_tipo = st.selectbox("🏫 Tipo:", ["Todos"] + sorted(list(df_resumo['Tipo'].unique())))
             df_escolas_view = df_resumo[df_resumo['Tipo'] == f_tipo] if f_tipo != "Todos" else df_resumo
@@ -487,7 +502,6 @@ def main():
                         if (sel := st.selectbox(cargo, ["Todos","FALTA","EXCEDENTE","OK"], key=f'fc_{i}')) != "Todos":
                             filtro_comb[cargo] = sel
 
-            # --- APLICAÇÃO DOS FILTROS ---
             mask = pd.Series([True] * len(df_resumo))
             if f_tipo != "Todos": mask &= (df_resumo['Tipo'] == f_tipo)
             if f_esc != "Todas": mask &= (df_resumo['Escola'] == f_esc)
@@ -523,7 +537,6 @@ def main():
 
             df_final = df_resumo[mask]
 
-            # --- TABELA FINAL ---
             if not df_final.empty:
                 df_view = df_final.copy()
                 cols_num = ['Edital', 'Real']
@@ -570,7 +583,6 @@ def main():
                     }
                 )
 
-                # CORREÇÃO AQUI: Só abre o modal da escola se o de volantes NÃO estiver aberto
                 if len(event.selection.rows) > 0 and not volantes_aberto:
                     idx = event.selection.rows[0]
                     esc_sel = df_lista.iloc[idx]['Escola']
@@ -581,7 +593,7 @@ def main():
                     
                     if f_txt:
                         df_pessoas_sel = df_pessoas_sel[df_pessoas_sel['Funcionario'].str.contains(f_txt, case=False, na=False) | 
-                                                                                df_pessoas_sel['ID'].astype(str).str.contains(f_txt, na=False)]
+                                                                                        df_pessoas_sel['ID'].astype(str).str.contains(f_txt, na=False)]
 
                     modal_detalhe_escola(esc_sel, row_stats, df_cargos_sel, df_pessoas_sel, conn, df_unidades_list, df_cargos_list)
             else:
