@@ -393,8 +393,8 @@ if df is not None and not df.empty:
 
     st.markdown("### Status de Solução")
     k4, k5, k6, k7 = st.columns(4)
-    k4.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
-    k5.metric("🌟 Solucionado", qtd_solucionado)
+    k4.metric("🚨 Com Glosa", qtd_glosa, delta_color="inverse")
+    k5.metric("✅ Solucionado", qtd_solucionado)
     k6.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Solucionado / (Solucionado + Glosa)")
     k7.metric("⏳ Aguardando", qtd_aguardando)
     
