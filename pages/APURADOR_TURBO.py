@@ -33,26 +33,28 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. FUNÇÕES DE API
+# 3. FUNÇÕES DE API (MODO HAR/BROWSER)
 # ==============================================================================
 
-def get_headers():
+def get_headers_har():
+    """ 
+    Headers copiados exatamente do fetch do navegador (HAR).
+    """
     return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
-        "OAuth-Token": PG_TOKEN,
-        "OAuth-Cdoperador": PG_CD_OPERADOR,
-        "OAuth-Nrorg": PG_NR_ORG
+        "accept": "application/json, text/plain, */*",
+        "oauth-cdoperador": str(PG_CD_OPERADOR),
+        "oauth-nrorg": str(PG_NR_ORG),
+        "oauth-token": str(PG_TOKEN),
+        "referrer": "https://portalgestor.teknisa.com/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
 @st.cache_data(ttl=3600) 
 def fetch_periodos_apuracao():
-    """ Busca lista de períodos disponível """
     url = "https://portalgestor.teknisa.com/backend/index.php/getPeriodosDemonstrativo"
     params = { "requestType": "FilterData", "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR }
     try:
-        r = requests.get(url, params=params, headers=get_headers(), timeout=10)
+        r = requests.get(url, params=params, headers=get_headers_har(), timeout=10)
         if r.status_code == 200:
             data = r.json()
             if "dataset" in data and "data" in data["dataset"]:
@@ -60,16 +62,13 @@ def fetch_periodos_apuracao():
     except: pass
     return pd.DataFrame()
 
-def buscar_vinculos_molde_har(nr_periodo, nr_estrut):
+def buscar_vinculos_exatos(nr_periodo, nr_estrut):
     """
-    USANDO O MOLDE EXATO DO HAR/FETCH:
-    Rota: getVinculosDoGestor
-    Método: GET
-    Parâmetros: FilterData, NRPERIODOAPURACAO, NRESTRUTURAM, NRORG, CDOPERADOR
+    Replica a requisição getVinculosDoGestor do log HAR.
     """
     url = "https://portalgestor.teknisa.com/backend/index.php/getVinculosDoGestor"
     
-    # Parâmetros exatos da requisição que você mandou
+    # Parâmetros na URL (Query String) igual ao fetch
     params = {
         "requestType": "FilterData",
         "NRPERIODOAPURACAO": nr_periodo,
@@ -78,35 +77,46 @@ def buscar_vinculos_molde_har(nr_periodo, nr_estrut):
         "CDOPERADOR": PG_CD_OPERADOR
     }
     
+    # Debug: Mostra o que está sendo enviado
+    st.session_state["last_request_debug"] = {
+        "url": url,
+        "params": params,
+        "headers": get_headers_har()
+    }
+
     try:
-        r = requests.get(url, params=params, headers=get_headers(), timeout=30)
+        r = requests.get(url, params=params, headers=get_headers_har(), timeout=30)
+        
+        # Salva o RAW response para debug se falhar
+        st.session_state["last_response_json"] = r.text
         
         if r.status_code == 200:
             data = r.json()
             dataset = data.get("dataset", {})
             
-            lista = []
+            # --- PARSER ROBUSTO ---
+            # 1. Tenta pegar a lista em 'getVinculosDoGestor' (Padrão HAR)
+            if isinstance(dataset, dict) and "getVinculosDoGestor" in dataset:
+                return dataset["getVinculosDoGestor"]
             
-            # Tenta pegar a lista no formato padrão dessa rota
-            if isinstance(dataset, dict):
-                # O nome da chave costuma ser igual ao nome da rota
-                if "getVinculosDoGestor" in dataset:
-                    lista = dataset["getVinculosDoGestor"]
-                # Fallback para 'data' se mudar
-                elif "data" in dataset:
-                    lista = dataset["data"]
+            # 2. Tenta pegar em 'data' (Padrão Diagnostico)
+            elif isinstance(dataset, dict) and "data" in dataset:
+                return dataset["data"]
+            
+            # 3. Se o dataset já for a lista
             elif isinstance(dataset, list):
-                lista = dataset
-
-            # Retorna a lista crua (sem filtros, traz todos os vínculos)
-            return lista if lista else []
+                return dataset
+                
+            return []
+            
+        else:
+            st.error(f"Erro HTTP {r.status_code}")
             
     except Exception as e:
-        st.error(f"Erro na requisição getVinculosDoGestor: {e}")
+        st.error(f"Erro técnico: {e}")
     return []
 
 def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo):
-    """ Executa a apuração POST """
     endpoint = f"{url_base}/apurarPeriodo"
     payload = {
         "requestType": "Row",
@@ -123,14 +133,12 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
         
         if r.status_code == 200:
             resp = r.json()
-            # Verifica sucesso real pelo flag 'apurado'
             dados = resp.get("dataset", {}).get("data", {}).get("apurarPeriodo", {})
-            
             if dados.get("apurado") is True:
                 return "SUCESSO", "Apuração Realizada", ""
             else:
                 infos = resp.get("dataset", {}).get("data", {}).get("info", [])
-                return "FALHA_LOGICA", "Retornou false", str(infos)
+                return "FALHA_LOGICA", "Não apurado", str(infos)
 
         elif r.status_code == 500:
             try:
@@ -150,7 +158,7 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
 # 4. INTERFACE E CONTROLES
 # ==============================================================================
 
-st.title("🚀 Apurador Turbo (Lista Completa)")
+st.title("🚀 Apurador Turbo (Modo HAR)")
 
 if "lista_funcionarios" not in st.session_state:
     st.session_state["lista_funcionarios"] = []
@@ -160,7 +168,7 @@ if "resultado_apuracao" not in st.session_state:
 with st.sidebar:
     st.header("Parâmetros")
     
-    # 1. PERÍODO (Selectbox igual Diagnóstico)
+    # Período
     df_periodos = fetch_periodos_apuracao()
     if not df_periodos.empty:
         periodo_fmt = df_periodos.apply(lambda x: f"{x['DSPERIODOAPURACAO']} (Cód: {x['NRPERIODOAPURACAO']})", axis=1)
@@ -172,26 +180,28 @@ with st.sidebar:
     
     st.divider()
     
-    # 2. ESTRUTURA
+    # Estrutura
     nr_estrutura = st.text_input("Estrutura (NRESTRUTURAM)", value="101091998")
-    
-    # 3. VELOCIDADE
     threads = st.slider("Velocidade (Threads)", 1, 10, 5)
     
     st.divider()
     
-    # 4. BOTÃO CARREGAR
-    if st.button("🔄 Carregar Lista de Vínculos", use_container_width=True):
+    if st.button("🔄 Carregar Lista (Via Vínculos)", use_container_width=True):
         st.session_state["lista_funcionarios"] = []
         st.session_state["resultado_apuracao"] = []
+        st.session_state["last_response_json"] = "" # Limpa debug anterior
         
-        with st.spinner(f"Buscando vínculos (getVinculosDoGestor) no período {nr_periodo}..."):
-            res = buscar_vinculos_molde_har(nr_periodo, nr_estrutura)
+        with st.spinner(f"Buscando no período {nr_periodo} para estrutura {nr_estrutura}..."):
+            res = buscar_vinculos_exatos(nr_periodo, nr_estrutura)
             st.session_state["lista_funcionarios"] = res
             
             if not res:
                 st.error("Nenhum registro encontrado.")
-                st.markdown("**Verifique:** Se o 'Período' selecionado possui vínculos ativos para esta 'Estrutura'.")
+                # --- ÁREA DE DEBUG AUTOMÁTICA ---
+                st.warning("⚠️ O retorno da API veio vazio ou inválido. Veja abaixo o que o servidor respondeu:")
+                with st.expander("🕵️‍♂️ Ver Resposta RAW do Servidor (Debug)", expanded=True):
+                    st.json(st.session_state.get("last_request_debug", {}))
+                    st.text_area("JSON Retornado:", st.session_state.get("last_response_json", "Sem resposta"), height=300)
             else:
                 st.success(f"Encontrados: {len(res)} vínculos.")
 
@@ -202,9 +212,7 @@ with st.sidebar:
 if st.session_state["lista_funcionarios"]:
     df_lista = pd.DataFrame(st.session_state["lista_funcionarios"])
     
-    # Exibição da lista carregada
     with st.expander(f"📋 Lista Carregada ({len(df_lista)} vínculos)", expanded=False):
-        # Tenta mostrar colunas úteis
         cols_possiveis = ['NRVINCULOM', 'NMVINCULOM', 'NMSITUFUNCH', 'NMFUNCAO']
         cols_show = [c for c in cols_possiveis if c in df_lista.columns]
         st.dataframe(df_lista[cols_show] if cols_show else df_lista, use_container_width=True, hide_index=True)
@@ -215,7 +223,7 @@ if st.session_state["lista_funcionarios"]:
         
         session = requests.Session()
         url_base = "https://portalgestor.teknisa.com/backend/index.php"
-        headers = get_headers()
+        headers = get_headers_har()
         
         total_items = len(df_lista)
         results = []
@@ -245,7 +253,6 @@ if st.session_state["lista_funcionarios"]:
                 results.append({
                     "Matrícula": row.get('NRVINCULOM'),
                     "Nome": row.get('NMVINCULOM', 'Desconhecido'),
-                    "Situação": row.get('NMSITUFUNCH', '-'),
                     "Status": status_cod,
                     "Mensagem": msg
                 })
@@ -264,7 +271,7 @@ if st.session_state["lista_funcionarios"]:
 if st.session_state["resultado_apuracao"]:
     df_res = pd.DataFrame(st.session_state["resultado_apuracao"])
     
-    tab1, tab2, tab3 = st.tabs(["📊 Geral", "⛔ Bloqueios/Erros", "✅ Sucesso"])
+    tab1, tab2, tab3 = st.tabs(["📊 Geral", "⛔ Bloqueios", "✅ Sucesso"])
     
     with tab1:
         st.dataframe(df_res, use_container_width=True, hide_index=True, selection_mode="single-row")
@@ -273,10 +280,7 @@ if st.session_state["resultado_apuracao"]:
         
     with tab2:
         df_err = df_res[df_res['Status'] != 'SUCESSO']
-        if df_err.empty:
-            st.info("Nenhum erro encontrado.")
-        else:
-            st.dataframe(df_err, use_container_width=True, hide_index=True)
+        st.dataframe(df_err, use_container_width=True, hide_index=True)
             
     with tab3:
         df_suc = df_res[df_res['Status'] == 'SUCESSO']
