@@ -40,7 +40,7 @@ except Exception as e:
     st.stop()
 
 # ==============================================================================
-# 3. GESTÃO DE SESSÃO HCM (CACHE)
+# 3. GESTÃO DE SESSÃO HCM
 # ==============================================================================
 def get_data_brasil():
     return datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -127,7 +127,7 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. API PORTAL GESTOR (Buscar IDs e Períodos)
+# 4. API PORTAL GESTOR
 # ==============================================================================
 def fetch_ids_portal_gestor(data_ref):
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
@@ -156,45 +156,29 @@ def fetch_ids_portal_gestor(data_ref):
 
 @st.cache_data(ttl=3600) 
 def fetch_periodos_apuracao():
-    """Busca a lista de períodos disponíveis no endpoint getPeriodosDemonstrativo"""
     url = "https://portalgestor.teknisa.com/backend/index.php/getPeriodosDemonstrativo"
-    params = {
-        "requestType": "FilterData",
-        "NRORG": PG_NR_ORG,
-        "CDOPERADOR": PG_CD_OPERADOR
-    }
-    headers = {
-        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json"
-    }
-    
+    params = { "requestType": "FilterData", "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR }
+    headers = { "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG, "User-Agent": "Mozilla/5.0" }
     try:
         r = requests.get(url, params=params, headers=headers, timeout=10)
         if r.status_code == 200:
             data = r.json()
             if "dataset" in data and "data" in data["dataset"]:
-                df = pd.DataFrame(data["dataset"]["data"])
-                return df
-    except Exception as e:
-        st.warning(f"Não foi possível carregar lista de períodos: {e}")
-    
+                return pd.DataFrame(data["dataset"]["data"])
+    except: pass
     return pd.DataFrame()
 
 # ==============================================================================
-# 5. API HCM (Buscar Ocorrências - SINGLE REQUEST)
+# 5. API HCM
 # ==============================================================================
 def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competencia):
     url = "https://hcm.teknisa.com/backend/index.php/getMarcacaoPontoOcorrencias"
-    
     headers = {
         "User-Agent": "Mozilla/5.0", "Content-Type": "application/json",
         "OAuth-Token": token, "OAuth-Hash": HCM_HASH,
         "OAuth-Project": HCM_PROJECT, "User-Id": HCM_UID_BROWSER,
         "OAuth-KeepConnected": "Yes"
     }
-    
-    # PAYLOAD COM A LISTA COMPLETA
     payload = {
         "disableLoader": False,
         "filter": [
@@ -205,22 +189,16 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
             {"name": "NRVINCULOM_LIST", "value": lista_ids, "operator": "IN", "isCustomFilter": True},
             {"name": "P_TIPOOCORRENCIA", "value": ["ATRASO", "FALTA"], "operator": "IN", "isCustomFilter": True}
         ],
-        "page": 1, 
-        "itemsPerPage": 99999,
-        "requestType": "FilterData"
+        "page": 1, "itemsPerPage": 99999, "requestType": "FilterData"
     }
-    
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=70) # Timeout generoso
+        r = requests.post(url, headers=headers, json=payload, timeout=80)
         if r.status_code == 200:
             data = r.json()
             if "dataset" in data and "getMarcacaoPontoOcorrencias" in data["dataset"]:
                 return pd.DataFrame(data["dataset"]["getMarcacaoPontoOcorrencias"])
-        else:
-            st.error(f"Erro HTTP {r.status_code}: {r.text}")
     except Exception as e:
-        st.error(f"Erro na Requisição Única: {e}")
-            
+        st.error(f"Erro na requisição: {e}")
     return pd.DataFrame()
 
 def decimal_para_hora(val):
@@ -231,114 +209,142 @@ def decimal_para_hora(val):
     except: return "00:00"
 
 # ==============================================================================
-# 6. INTERFACE PRINCIPAL
+# 6. INTERFACE
 # ==============================================================================
 
 st.title("⚡ Relatório Turbo - Faltas e Atrasos (HCM)")
-st.markdown("**Modo Otimizado:** Busca em lote e seleção dinâmica de períodos.")
+st.markdown("**Modo Otimizado:** Ignora ocorrências do dia vigente.")
 
 with st.sidebar:
     st.header("Parâmetros")
     
-    # 1. SELEÇÃO DE PERÍODO (AUTOMATIZADA)
     df_periodos = fetch_periodos_apuracao()
-    
-    periodo_selecionado = None
+    periodo_apuracao = "1904"
     competencia_sugerida = datetime.now().replace(day=1).strftime("%d/%m/%Y")
     
     if not df_periodos.empty:
-        # --- ALTERAÇÃO AQUI: Usa apenas a descrição no visual ---
         opcao = st.selectbox("Selecione o Período:", df_periodos['DSPERIODOAPURACAO'])
-        
-        # Recupera o ID (Código) correspondente à descrição selecionada
-        # Filtra o dataframe para achar a linha onde a descrição bate
         row_sel = df_periodos[df_periodos['DSPERIODOAPURACAO'] == opcao].iloc[0]
         periodo_apuracao = row_sel['NRPERIODOAPURACAO']
-        
-        # Tenta calcular a competência sugerida baseada na data inicial do período
         try:
-            dt_ini_str = row_sel['DTINICIALAPURACAO'] # ex: 16/01/2026
-            dt_ini = datetime.strptime(dt_ini_str, "%d/%m/%Y")
+            dt_ini = datetime.strptime(row_sel['DTINICIALAPURACAO'], "%d/%m/%Y")
             competencia_sugerida = dt_ini.replace(day=1).strftime("%d/%m/%Y")
-        except:
-            pass
-            
+        except: pass
     else:
-        # Fallback manual se a API de períodos falhar
         periodo_apuracao = st.text_input("Período Apuração (Cód)", value="1904")
 
-    # 2. OUTROS FILTROS
-    mes_competencia = st.text_input("Mês Competência (HCM)", value=competencia_sugerida, help="Data base para o HCM (Dia 01 do mês).")
+    mes_competencia = st.text_input("Mês Competência (HCM)", value=competencia_sugerida)
     data_ref = st.date_input("Data Ref. (Para Lista de Ativos)", datetime.now())
     
     st.divider()
-    # --- ALTERAÇÃO AQUI: Removeu o type="primary" ---
     btn_buscar = st.button("🚀 Disparar Análise", use_container_width=True)
 
 if btn_buscar:
-    # 1. BUSCA IDs NO PORTAL GESTOR
-    with st.status("🔄 Preparando dados...", expanded=True) as status:
-        status.write("Obtendo lista de funcionários ativos no Portal Gestor...")
+    with st.status("🔄 Analisando...", expanded=True) as status:
+        # 1. LISTA DE ATIVOS
+        status.write("Buscando funcionários ativos...")
         df_funcionarios = fetch_ids_portal_gestor(data_ref)
-        
         if df_funcionarios.empty:
-            status.update(label="❌ Ninguém encontrado no Portal Gestor.", state="error")
-            st.stop()
+            status.update(label="❌ Lista vazia.", state="error"); st.stop()
             
         lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
-        mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'].astype(str), df_funcionarios['NMESTRUTGEREN']))
         
-        status.write(f"✅ Lista pronta: **{len(lista_ids)}** IDs.")
-        status.write("🔐 Autenticando no HCM...")
+        # Cria mapas para referência
+        df_funcionarios['NRVINCULOM'] = df_funcionarios['NRVINCULOM'].astype(str)
+        mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMVINCULOM']))
+        mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMESTRUTGEREN']))
+        
+        # 2. HCM
+        status.write("Consultando ocorrências no HCM...")
         token_hcm = obter_sessao_hcm()
         if not token_hcm:
-            status.update(label="❌ Falha de login HCM.", state="error")
-            st.stop()
+            status.update(label="❌ Falha login HCM.", state="error"); st.stop()
             
-        # 3. BUSCA OCORRÊNCIAS (SINGLE SHOT)
-        status.write(f"⚡ Consultando Período ID {periodo_apuracao} no HCM...")
         df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
-        
         status.update(label="Sucesso!", state="complete", expanded=False)
 
-    # 4. PROCESSAMENTO
-    if df_ocorrencias.empty:
-        st.info("Nenhuma ocorrência retornada ou erro na requisição.")
-    else:
-        df_ocorrencias['DIFF_HOURS'] = pd.to_numeric(df_ocorrencias['DIFF_HOURS'], errors='coerce').fillna(0)
-        df_ocorrencias['NRVINCULOM'] = df_ocorrencias['NRVINCULOM'].astype(str)
-        df_ocorrencias['Escola_Atual'] = df_ocorrencias['NRVINCULOM'].map(mapa_escolas)
+    # --- PROCESSAMENTO INTELIGENTE ---
+    
+    # 1. FILTRO DE DATA VIGENTE (HOJE)
+    hoje_str = datetime.now().strftime('%Y-%m-%d')
+    ocorrencias_filtradas = pd.DataFrame()
+    
+    if not df_ocorrencias.empty:
+        # Remove ocorrências onde DATA_INICIO_FILTER == Hoje
+        df_ocorrencias['DATA_INICIO_FILTER'] = df_ocorrencias['DATA_INICIO_FILTER'].astype(str)
+        qtd_antes = len(df_ocorrencias)
+        ocorrencias_filtradas = df_ocorrencias[df_ocorrencias['DATA_INICIO_FILTER'] != hoje_str].copy()
+        qtd_depois = len(ocorrencias_filtradas)
         
-        # Agrupamento
-        resumo = df_ocorrencias.groupby(['NRVINCULOM', 'NMVINCULOM', 'Escola_Atual']).agg(
+        if qtd_antes > qtd_depois:
+            st.toast(f"ℹ️ {qtd_antes - qtd_depois} ocorrências de hoje ({hoje_str}) foram ignoradas.")
+    
+    # 2. SEPARAÇÃO E CÁLCULOS
+    if ocorrencias_filtradas.empty:
+        st.success("🎉 Nenhuma falta ou atraso encontrado (exceto hoje)!")
+    else:
+        ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
+        ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
+        
+        # Garante nomes atualizados do Portal
+        ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
+        ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
+        
+        # AGRUPAMENTO GERAL
+        resumo = ocorrencias_filtradas.groupby(['NRVINCULOM', 'Funcionario', 'Escola']).agg(
             Qtd_Faltas=('TIPO_OCORRENCIA', lambda x: (x == 'FALTA').sum()),
-            Total_Horas_Atraso=('DIFF_HOURS', lambda x: x[df_ocorrencias.loc[x.index, 'TIPO_OCORRENCIA'] == 'ATRASO'].sum()),
+            Total_Horas_Atraso=('DIFF_HOURS', lambda x: x[ocorrencias_filtradas.loc[x.index, 'TIPO_OCORRENCIA'] == 'ATRASO'].sum()),
             Datas=('DATA_INICIO', lambda x: ", ".join(sorted(x.unique())))
         ).reset_index()
         
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
-        resumo = resumo.sort_values(by=['Qtd_Faltas', 'Total_Horas_Atraso'], ascending=False)
-        
+
+        # 3. IDENTIFICAR "SEM OCORRÊNCIAS"
+        ids_com_problema = set(resumo['NRVINCULOM'].unique())
+        # Filtra do DF original quem não está na lista de problemas
+        df_sem_ocorrencias = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
+        df_sem_ocorrencias = df_sem_ocorrencias[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(
+            columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'}
+        )
+
         # --- EXIBIÇÃO ---
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Funcionários Encontrados", len(resumo))
-        k2.metric("Total Faltas", resumo['Qtd_Faltas'].sum())
-        k3.metric("Total Atraso (Horas)", f"{resumo['Total_Horas_Atraso'].sum():.1f}h")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Analisado", len(df_funcionarios))
+        k2.metric("Ponto Excelente", len(df_sem_ocorrencias), delta_color="normal")
+        k3.metric("Com Faltas/Atrasos", len(resumo), delta_color="inverse")
+        k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
         
         st.divider()
         
-        st.subheader("📋 Relatório Consolidado")
-        st.dataframe(
-            resumo,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
-                "Tempo_Atraso_Fmt": st.column_config.TextColumn("Tempo Atraso"),
-                "Total_Horas_Atraso": st.column_config.NumberColumn("Decimais", format="%.2f"),
-                "Datas": st.column_config.TextColumn("Dias das Ocorrências", width="large")
-            }
-        )
+        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
         
-        csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-        st.download_button("📥 Baixar Relatório (CSV)", csv, f"hcm_ocorrencias_{periodo_apuracao}.csv", "text/csv")
+        with tab1:
+            st.subheader("Quem mais faltou no período")
+            df_faltas = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+            st.dataframe(
+                df_faltas[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Qtd_Faltas": st.column_config.NumberColumn("Qtd. Faltas", format="%d ❌")}
+            )
+            
+        with tab2:
+            st.subheader("Quem tem mais horas de atraso")
+            df_atrasos = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+            st.dataframe(
+                df_atrasos[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
+            )
+            
+        with tab3:
+            st.subheader(f"✅ Ponto Excelente ({len(df_sem_ocorrencias)})")
+            st.caption("Colaboradores ativos sem nenhuma falta ou atraso registrado no período (descontando hoje).")
+            st.dataframe(df_sem_ocorrencias, use_container_width=True, hide_index=True)
+            
+        with tab4:
+            st.subheader("Tabela Geral Consolidada")
+            st.dataframe(resumo, use_container_width=True, hide_index=True)
+            csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
+            st.download_button("📥 Baixar Planilha", csv, f"hcm_relatorio_{periodo_apuracao}.csv", "text/csv")
