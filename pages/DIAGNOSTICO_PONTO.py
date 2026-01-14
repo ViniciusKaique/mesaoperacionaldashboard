@@ -310,13 +310,13 @@ if btn_buscar:
         # --- EXIBIÇÃO ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Analisado", len(df_funcionarios))
-        k2.metric("Ponto Excelente", len(df_sem_ocorrencias), delta_color="normal")
+        k2.metric("Sem Ocorrências", len(df_sem_ocorrencias), delta_color="normal")
         k3.metric("Com Faltas/Atrasos", len(resumo), delta_color="inverse")
         k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
         
         st.divider()
         
-        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
+        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Sem Ocorrências", "📋 Base Completa"])
         
         with tab1:
             st.subheader("Quem mais faltou no período")
@@ -339,7 +339,7 @@ if btn_buscar:
             )
             
         with tab3:
-            st.subheader(f"✅ Ponto Excelente ({len(df_sem_ocorrencias)})")
+            st.subheader(f"Funcionários Zero Defeitos ({len(df_sem_ocorrencias)})")
             st.caption("Colaboradores ativos sem nenhuma falta ou atraso registrado no período (descontando hoje).")
             st.dataframe(df_sem_ocorrencias, use_container_width=True, hide_index=True)
             
