@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==============================================================================
 st.set_page_config(page_title="HCM - Apurador Turbo", layout="wide", page_icon="🚀")
 
+# CSS para melhor visualização
 st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { font-size: 1.4rem; }
@@ -23,7 +24,7 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# Carrega secrets
+# Carrega secrets (Exatamente como no Diagnóstico)
 try:
     SECRETS_PG = st.secrets["api_portal_gestor"]
     PG_TOKEN = SECRETS_PG["token_fixo"]
@@ -48,7 +49,7 @@ def get_headers():
 
 @st.cache_data(ttl=3600) 
 def fetch_periodos_apuracao():
-    """ Busca lista de períodos para o selectbox """
+    """ Busca lista de períodos igual ao Diagnóstico """
     url = "https://portalgestor.teknisa.com/backend/index.php/getPeriodosDemonstrativo"
     params = { "requestType": "FilterData", "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR }
     try:
@@ -60,42 +61,44 @@ def fetch_periodos_apuracao():
     except: pass
     return pd.DataFrame()
 
-def buscar_quadro_mesa_operacional(data_ref, nr_estrut):
+def buscar_quadro_mesa(data_ref, nr_estrutura):
     """
-    CÓPIA EXATA DA LÓGICA DO DIAGNOSTICO_PONTO.PY
-    Rota: getMesaOperacoes
+    Lógica idêntica ao fetch_ids_portal_gestor do Diagnóstico.
+    Usa getMesaOperacoes que sabemos que funciona.
     """
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
-    
-    # Parâmetros iguais ao arquivo de referência 
     params = {
         "requestType": "FilterData",
-        "DIA": data_ref.strftime("%d/%m/%Y"), # Exige data formatada
-        "NRESTRUTURAM": nr_estrut,
-        "NRORG": PG_NR_ORG,
+        "DIA": data_ref.strftime("%d/%m/%Y"), # Ex: 14/01/2026
+        "NRESTRUTURAM": nr_estrutura,
+        "NRORG": PG_NR_ORG, 
         "CDOPERADOR": PG_CD_OPERADOR
     }
     
     try:
+        # Timeout um pouco maior pois a Mesa pode ser lenta
         r = requests.get(url, params=params, headers=get_headers(), timeout=30)
+        
         if r.status_code == 200:
             data = r.json()
-            # Parser igual ao Diagnóstico 
             if "dataset" in data and "data" in data["dataset"]:
                 lista = data["dataset"]["data"]
                 
-                # AQUI ESTÁ A DIFERENÇA: 
-                # O Diagnóstico faz: df = df[df['NMSITUFUNCH'] == 'Atividade Normal']
-                # Nós retornamos TUDO sem filtrar.
+                # Retorna a lista crua (sem filtrar Atividade Normal, para pegar todos)
                 return lista
             else:
-                st.error("Estrutura do JSON inesperada (dataset.data não encontrado).")
+                # Se não tiver 'data', tenta 'dataset' direto caso mude o padrão
+                return data.get("dataset", [])
     except Exception as e:
-        st.error(f"Erro ao buscar Mesa Operacional: {e}")
+        st.error(f"Erro ao buscar quadro: {e}")
+    
     return []
 
 def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo):
+    """ Executa a apuração e trata o retorno """
     endpoint = f"{url_base}/apurarPeriodo"
+    
+    # Payload validado por você
     payload = {
         "requestType": "Row",
         "row": {
@@ -112,11 +115,12 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
         if r.status_code == 200:
             resp = r.json()
             dados = resp.get("dataset", {}).get("data", {}).get("apurarPeriodo", {})
+            
             if dados.get("apurado") is True:
                 return "SUCESSO", "Apuração Realizada", ""
             else:
                 infos = resp.get("dataset", {}).get("data", {}).get("info", [])
-                return "FALHA_LOGICA", "Não apurado", str(infos)
+                return "FALHA_LOGICA", "Flag 'apurado' False", str(infos)
 
         elif r.status_code == 500:
             try:
@@ -136,7 +140,7 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
 # 4. INTERFACE
 # ==============================================================================
 
-st.title("🚀 Apurador Turbo (Via Mesa Operacional)")
+st.title("🚀 Apurador Turbo (Base: Mesa Operacional)")
 
 if "lista_funcionarios" not in st.session_state:
     st.session_state["lista_funcionarios"] = []
@@ -146,17 +150,18 @@ if "resultado_apuracao" not in st.session_state:
 with st.sidebar:
     st.header("Parâmetros")
     
-    # 1. DATA DE REFERÊNCIA (Necessário para getMesaOperacoes)
+    # 1. DATA REFERÊNCIA (Necessário para a Mesa Operacional)
     data_ref = st.date_input("Data Referência (Para buscar o quadro)", datetime.now())
-    st.caption("Esta data é usada apenas para listar quem pertence ao gestor.")
+    st.caption("A data serve apenas para listar quem pertence à equipe.")
     
     st.divider()
 
-    # 2. PERÍODO DE APURAÇÃO (Para executar a ação)
+    # 2. PERÍODO APURAÇÃO
     df_periodos = fetch_periodos_apuracao()
     if not df_periodos.empty:
+        # Cria label amigável
         periodo_fmt = df_periodos.apply(lambda x: f"{x['DSPERIODOAPURACAO']} (Cód: {x['NRPERIODOAPURACAO']})", axis=1)
-        opcao = st.selectbox("Selecione o Período de Apuração:", periodo_fmt)
+        opcao = st.selectbox("Selecione o Período:", periodo_fmt)
         idx = periodo_fmt[periodo_fmt == opcao].index[0]
         nr_periodo = df_periodos.iloc[idx]['NRPERIODOAPURACAO']
     else:
@@ -164,25 +169,26 @@ with st.sidebar:
     
     st.divider()
     
+    # 3. ESTRUTURA E VELOCIDADE
     nr_estrutura = st.text_input("Estrutura (NRESTRUTURAM)", value="101091998")
     threads = st.slider("Velocidade (Threads)", 1, 10, 5)
     
     st.divider()
     
+    # 4. BOTÃO CARREGAR
     if st.button("🔄 Carregar Lista (Mesa)", use_container_width=True):
         st.session_state["lista_funcionarios"] = []
         st.session_state["resultado_apuracao"] = []
         
-        # Chama a função idêntica ao Diagnóstico
-        with st.spinner(f"Buscando quadro em {data_ref.strftime('%d/%m/%Y')}..."):
-            res = buscar_quadro_mesa_operacional(data_ref, nr_estrutura)
+        with st.spinner(f"Buscando quadro de {data_ref.strftime('%d/%m/%Y')}..."):
+            res = buscar_quadro_mesa(data_ref, nr_estrutura)
             st.session_state["lista_funcionarios"] = res
             
             if not res:
                 st.error("Nenhum registro encontrado na Mesa Operacional.")
-                st.info("Verifique Data e Estrutura.")
+                st.info("Verifique se a Data Referência e a Estrutura estão corretas.")
             else:
-                st.success(f"Encontrados: {len(res)} funcionários.")
+                st.success(f"Encontrados: {len(res)} vínculos.")
 
 # ==============================================================================
 # 5. EXECUÇÃO
@@ -251,7 +257,7 @@ if st.session_state["lista_funcionarios"]:
 if st.session_state["resultado_apuracao"]:
     df_res = pd.DataFrame(st.session_state["resultado_apuracao"])
     
-    tab1, tab2, tab3 = st.tabs(["📊 Geral", "⛔ Erros", "✅ Sucesso"])
+    tab1, tab2, tab3 = st.tabs(["📊 Geral", "⛔ Erros/Bloqueios", "✅ Sucesso"])
     
     with tab1:
         st.dataframe(df_res, use_container_width=True, hide_index=True, selection_mode="single-row")
