@@ -1,22 +1,3 @@
-Diretamente pelo navegador (clicando no link), **não é possível**.
-
-**Por que?**
-Quando você clica em um link `https://...` no navegador, ele tenta abrir a página "pelada", sem nenhuma senha. A API da Teknisa exige que as senhas (Tokens e Hashs) sejam enviadas no "cabeçalho" (Header) da requisição, algo que o navegador não faz sozinho num clique simples.
-
-**A Solução (O "Pulo do Gato"):**
-Em vez de mandar o usuário para um link que vai dar erro, nós faremos o **Python (que tem as credenciais do `secrets.toml`)** buscar esses dados e abrir uma **Janela (Pop-up)** dentro do próprio Streamlit com as informações.
-
-Aqui está o código **completo e corrigido** para o arquivo `pages/DIAGNOSTICO_PONTO.py`.
-
-### O que mudou neste código:
-
-1. **Sem Links Quebrados:** Removi a coluna de link que dava erro 403.
-2. **Clique na Tabela:** Agora, ao clicar em uma linha da tabela (Faltas ou Atrasos), o sistema captura o ID.
-3. **Janela Modal:** Abre automaticamente um **Pop-up (`st.dialog`)** mostrando o espelho de ponto detalhado daquela pessoa, buscado pelo Python usando suas credenciais seguras.
-
-Copie e substitua todo o arquivo:
-
-```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -36,7 +17,7 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# --- CREDENCIAIS HCM ---
+# --- CARREGAR CREDENCIAIS (COM TRATAMENTO DE ERRO) ---
 try:
     SECRETS_HCM = st.secrets["hcm_api"]
     HCM_USER = SECRETS_HCM["usuario"]
@@ -44,22 +25,17 @@ try:
     HCM_HASH = SECRETS_HCM["hash_sessao"]
     HCM_UID_BROWSER = SECRETS_HCM["user_id_browser"]
     HCM_PROJECT = SECRETS_HCM.get("project_id", "750")
-except Exception as e:
-    st.error(f"⚠️ Erro Config HCM: {e}")
-    st.stop()
 
-# --- CREDENCIAIS PORTAL GESTOR ---
-try:
     SECRETS_PG = st.secrets["api_portal_gestor"]
     PG_TOKEN = SECRETS_PG["token_fixo"]
     PG_CD_OPERADOR = SECRETS_PG["cd_operador"]
     PG_NR_ORG = SECRETS_PG["nr_org"]
 except Exception as e:
-    st.error(f"⚠️ Erro Config Portal Gestor: {e}")
+    st.error(f"⚠️ Erro ao carregar secrets.toml: {e}")
     st.stop()
 
 # ==============================================================================
-# 3. GESTÃO DE SESSÃO HCM
+# 3. GESTÃO DE SESSÃO E BANCO DE DADOS
 # ==============================================================================
 def get_data_brasil():
     return datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -146,7 +122,7 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. API PORTAL GESTOR
+# 4. API PORTAL GESTOR (CONEXÕES)
 # ==============================================================================
 def fetch_ids_portal_gestor(data_ref):
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
@@ -221,14 +197,11 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
     return pd.DataFrame()
 
 # ==============================================================================
-# 6. API HCM - DETALHES DO PONTO (ESPELHO) - AQUI ESTÁ O SEGREDO
+# 6. API HCM - DETALHES DO PONTO (ESPELHO)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def fetch_dias_demonstrativo(vinculo, periodo):
-    """ 
-    Busca os dados usando AS CREDENCIAIS DO PYTHON (Secrets) 
-    e retorna o DataFrame para ser exibido na tela.
-    """
+    """ Busca os dados usando AS CREDENCIAIS DO SECRETS para contornar erro 403 """
     url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
     params = {
         "requestType": "FilterData",
@@ -237,7 +210,6 @@ def fetch_dias_demonstrativo(vinculo, periodo):
         "NRORG": PG_NR_ORG,
         "CDOPERADOR": PG_CD_OPERADOR
     }
-    # Aqui inserimos os Headers de segurança que o navegador não tem
     headers = {
         "OAuth-Token": PG_TOKEN, 
         "OAuth-Cdoperador": PG_CD_OPERADOR, 
@@ -262,7 +234,42 @@ def decimal_para_hora(val):
     except: return "00:00"
 
 # ==============================================================================
-# 7. INTERFACE
+# 7. INTERFACE E MODAL
+# ==============================================================================
+
+@st.dialog("📅 Espelho de Ponto (Detalhado)", width="large")
+def mostrar_espelho_modal(nome, vinculo, periodo):
+    st.write(f"**Funcionário:** {nome}")
+    st.caption(f"Matrícula: {vinculo} | Período ID: {periodo}")
+    
+    with st.spinner("Buscando batidas no sistema..."):
+        df_espelho = fetch_dias_demonstrativo(vinculo, periodo)
+    
+    if not df_espelho.empty:
+        # Colunas mais úteis para exibir
+        cols_show = ['DTAPURACAO', 'DSPONTODIA', 'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2', 'ENTRADA_SAIDA_3', 'QTHORASREALIZADAS', 'QTHORASABONADAS', 'QTHORASFALTAS']
+        # Filtra só as que existem
+        cols_final = [c for c in cols_show if c in df_espelho.columns]
+        
+        st.dataframe(
+            df_espelho[cols_final],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "DTAPURACAO": st.column_config.TextColumn("Data"),
+                "DSPONTODIA": st.column_config.TextColumn("Situação", width="medium"),
+                "QTHORASFALTAS": st.column_config.NumberColumn("Faltas (h)", format="%.2f"),
+                "QTHORASREALIZADAS": st.column_config.NumberColumn("Trab (h)", format="%.2f"),
+                "ENTRADA_SAIDA_1": "E1/S1",
+                "ENTRADA_SAIDA_2": "E2/S2",
+                "ENTRADA_SAIDA_3": "E3/S3"
+            }
+        )
+    else:
+        st.warning("⚠️ Não foi possível carregar o espelho. Verifique se há dados para este período.")
+
+# ==============================================================================
+# 8. LÓGICA PRINCIPAL DA PÁGINA
 # ==============================================================================
 
 st.title("⚡ Relatório Turbo - Faltas e Atrasos (HCM)")
@@ -292,39 +299,6 @@ with st.sidebar:
     st.divider()
     btn_buscar = st.button("🚀 Disparar Análise", use_container_width=True)
 
-# --- FUNÇÃO PARA ABRIR O MODAL ---
-@st.dialog("📅 Espelho de Ponto (Detalhado)", width="large")
-def mostrar_espelho_modal(nome, vinculo, periodo):
-    st.write(f"**Funcionário:** {nome}")
-    st.caption(f"Matrícula: {vinculo} | Período ID: {periodo}")
-    
-    with st.spinner("Buscando batidas no sistema..."):
-        # O Python busca os dados com as credenciais
-        df_espelho = fetch_dias_demonstrativo(vinculo, periodo)
-    
-    if not df_espelho.empty:
-        # Colunas mais úteis para exibir
-        cols_show = ['DTAPURACAO', 'DSPONTODIA', 'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2', 'ENTRADA_SAIDA_3', 'QTHORASREALIZADAS', 'QTHORASABONADAS', 'QTHORASFALTAS']
-        # Filtra só as que existem
-        cols_final = [c for c in cols_show if c in df_espelho.columns]
-        
-        st.dataframe(
-            df_espelho[cols_final],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "DTAPURACAO": st.column_config.TextColumn("Data"),
-                "DSPONTODIA": st.column_config.TextColumn("Situação", width="medium"),
-                "QTHORASFALTAS": st.column_config.NumberColumn("Faltas (h)", format="%.2f"),
-                "QTHORASREALIZADAS": st.column_config.NumberColumn("Trab (h)", format="%.2f"),
-                "ENTRADA_SAIDA_1": "E1/S1",
-                "ENTRADA_SAIDA_2": "E2/S2",
-                "ENTRADA_SAIDA_3": "E3/S3"
-            }
-        )
-    else:
-        st.warning("⚠️ Não foi possível carregar o espelho. Verifique se há dados para este período.")
-
 if btn_buscar:
     with st.status("🔄 Analisando...", expanded=True) as status:
         # 1. LISTA DE ATIVOS
@@ -349,7 +323,7 @@ if btn_buscar:
         df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
         status.update(label="Sucesso!", state="complete", expanded=False)
 
-    # --- PROCESSAMENTO ---
+    # --- PROCESSAMENTO DOS DADOS ---
     hoje_str = datetime.now().strftime('%Y-%m-%d')
     ocorrencias_filtradas = pd.DataFrame()
     
@@ -371,15 +345,18 @@ if btn_buscar:
         ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
         ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
         
-        # Separa Faltas e Atrasos
+        # Separa Faltas
         df_only_faltas = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].copy()
         s_faltas = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
         
+        # Separa Atrasos
         df_only_atrasos = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
         s_atrasos = df_only_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
         
+        # Datas para exibição
         s_datas = ocorrencias_filtradas.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
         
+        # Monta Resumo
         df_base = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
         resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
         
@@ -397,7 +374,7 @@ if btn_buscar:
         k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
         
         st.divider()
-        st.info("💡 **Dica:** Clique em uma linha da tabela para abrir o espelho de ponto detalhado.")
+        st.info("💡 **Dica:** Clique na linha da tabela para abrir o Espelho de Ponto detalhado.")
 
         tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
         
@@ -405,19 +382,16 @@ if btn_buscar:
         with tab1:
             if not resumo.empty:
                 df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
-                # selection_mode="single-row" ativa a seleção
                 event1 = st.dataframe(
                     df_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
                     use_container_width=True, hide_index=True,
                     selection_mode="single-row", on_select="rerun", key="grid_faltas",
                     column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias Falta", format="%d ❌")}
                 )
-                # Se clicou na linha
                 if len(event1.selection.rows) > 0:
-                    idx_visual = event1.selection.rows[0] # Índice visual (0, 1, 2...)
-                    row_data = df_show.iloc[idx_visual]   # Pega os dados reais
+                    idx = event1.selection.rows[0]
+                    row_data = df_show.iloc[idx]
                     mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao)
-
             else: st.info("Sem faltas.")
             
         # --- TAB 2: ATRASOS (COM CLIQUE) ---
@@ -431,10 +405,9 @@ if btn_buscar:
                     column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
                 )
                 if len(event2.selection.rows) > 0:
-                    idx_visual = event2.selection.rows[0]
-                    row_data = df_show2.iloc[idx_visual]
+                    idx = event2.selection.rows[0]
+                    row_data = df_show2.iloc[idx]
                     mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao)
-
             else: st.info("Sem atrasos.")
 
         # --- TAB 3: SEM OCORRÊNCIAS ---
@@ -449,8 +422,8 @@ if btn_buscar:
                     selection_mode="single-row", on_select="rerun", key="grid_geral"
                 )
                 if len(event4.selection.rows) > 0:
-                    idx_visual = event4.selection.rows[0]
-                    row_data = resumo.iloc[idx_visual]
+                    idx = event4.selection.rows[0]
+                    row_data = resumo.iloc[idx]
                     mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao)
                 
                 csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
