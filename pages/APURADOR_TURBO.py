@@ -182,7 +182,7 @@ with st.sidebar:
     
     # Estrutura
     nr_estrutura = st.text_input("Estrutura (NRESTRUTURAM)", value="101091998")
-    threads = st.slider("Velocidade (Threads)", 1, 10, 5)
+    threads = st.slider("Velocidade (Threads)", 1, 200, 100)
     
     st.divider()
     
