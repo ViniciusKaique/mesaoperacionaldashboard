@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import concurrent.futures
+import time
 from datetime import datetime
 
 # ==============================================================================
@@ -9,38 +10,43 @@ from datetime import datetime
 # ==============================================================================
 st.set_page_config(
     page_title="Diagnóstico de Ponto",
-    page_icon="🕵️‍♀️",
+    page_icon="⏱️",
     layout="wide"
 )
 
 # ==============================================================================
-# 2. SEGURANÇA E CREDENCIAIS (DO SECRETS)
+# 2. SEGURANÇA E CREDENCIAIS
 # ==============================================================================
 if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# Carrega TUDO do st.secrets["api_portal_gestor"]
 try:
     api_creds = st.secrets["api_portal_gestor"]
-    
     TOKEN_FIXO = api_creds["token_fixo"]
-    CD_OPERADOR = api_creds["cd_operador"] # Agora pega direto do secrets
-    NR_ORG = api_creds["nr_org"]           # Agora pega direto do secrets
-    
+    CD_OPERADOR = api_creds["cd_operador"]
+    NR_ORG = api_creds["nr_org"]
 except Exception as e:
-    st.error("⚠️ Erro de Configuração: As credenciais (token_fixo, cd_operador, nr_org) não foram encontradas no secrets.toml.")
-    st.error(f"Detalhe do erro: {e}")
+    st.error("⚠️ Erro de Configuração: Credenciais não encontradas no secrets.toml.")
     st.stop()
 
 # ==============================================================================
-# 3. FUNÇÕES DE API
+# 3. FUNÇÕES DE SUPORTE (FORMATACAO)
+# ==============================================================================
+def decimal_para_hora_str(valor_decimal):
+    """Converte 1.50 para '01:30', por exemplo."""
+    if not valor_decimal: return "00:00"
+    horas = int(valor_decimal)
+    minutos = int((valor_decimal - horas) * 60)
+    return f"{horas:02d}:{minutos:02d}"
+
+# ==============================================================================
+# 4. FUNÇÕES DE API
 # ==============================================================================
 
-def fetch_lista_funcionarios(data_ref):
+def fetch_lista_funcionarios_ativos(data_ref):
     """
-    Busca a lista de funcionários ativos usando getMesaOperacoes
-    para pegar os IDs (NRVINCULOM).
+    Busca funcionários onde NMSITUFUNCH == 'Atividade Normal'.
     """
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
     data_str = data_ref.strftime("%d/%m/%Y")
@@ -48,7 +54,7 @@ def fetch_lista_funcionarios(data_ref):
     params = {
         "requestType": "FilterData",
         "DIA": data_str,
-        "NRESTRUTURAM": "101091998", # Estrutura padrão (ajustar se necessário)
+        "NRESTRUTURAM": "101091998",
         "NRORG": NR_ORG,
         "CDOPERADOR": CD_OPERADOR
     }
@@ -67,24 +73,21 @@ def fetch_lista_funcionarios(data_ref):
             data = r.json()
             if "dataset" in data and "data" in data["dataset"]:
                 df = pd.DataFrame(data["dataset"]["data"])
-                if not df.empty:
-                    # Retorna DF limpo com colunas essenciais
-                    return df[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(columns={
-                        'NRVINCULOM': 'ID',
-                        'NMVINCULOM': 'Funcionario',
-                        'NMESTRUTGEREN': 'Escola'
-                    })
+                if not df.empty and 'NMSITUFUNCH' in df.columns:
+                    # Filtra apenas Atividade Normal
+                    df = df[df['NMSITUFUNCH'].str.strip() == 'Atividade Normal']
+                    if not df.empty:
+                        return df[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(columns={
+                            'NRVINCULOM': 'ID',
+                            'NMVINCULOM': 'Funcionario',
+                            'NMESTRUTGEREN': 'Escola'
+                        })
     except Exception as e:
-        st.error(f"Erro ao buscar lista de funcionários: {e}")
-    
+        st.error(f"Erro Lista: {e}")
     return pd.DataFrame()
 
 def fetch_detalhe_ponto(id_funcionario, nr_periodo):
-    """
-    Busca o detalhe dos dias (cartão de ponto) para um ID específico.
-    """
     url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
-    
     params = {
         "requestType": "FilterData",
         "NRVINCULOM": str(id_funcionario),
@@ -92,7 +95,6 @@ def fetch_detalhe_ponto(id_funcionario, nr_periodo):
         "NRORG": NR_ORG,
         "CDOPERADOR": CD_OPERADOR
     }
-    
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json",
@@ -100,7 +102,6 @@ def fetch_detalhe_ponto(id_funcionario, nr_periodo):
         "OAuth-Cdoperador": CD_OPERADOR,
         "OAuth-Nrorg": NR_ORG
     }
-    
     try:
         r = requests.get(url, params=params, headers=headers, timeout=20)
         if r.status_code == 200:
@@ -112,15 +113,12 @@ def fetch_detalhe_ponto(id_funcionario, nr_periodo):
     return []
 
 # ==============================================================================
-# 4. LÓGICA DE DIAGNÓSTICO
+# 5. LÓGICA CENTRAL (PROCESSAMENTO)
 # ==============================================================================
 
 def analisar_funcionario(row, nr_periodo):
     """
-    Processa as regras de negócio:
-    1. ID_DIAAPURADO == 'N' -> Não Apurado
-    2. FL_DIAS preenchido -> Falta
-    3. BH_DESC_DIA negativo -> Atraso
+    Retorna métricas completas do funcionário, mesmo que esteja tudo OK.
     """
     id_func = row['ID']
     nome_func = row['Funcionario']
@@ -129,156 +127,179 @@ def analisar_funcionario(row, nr_periodo):
     dias = fetch_detalhe_ponto(id_func, nr_periodo)
     
     if not dias:
-        return None 
+        # Se não trouxe dias, pode ser erro ou período sem dados
+        return {
+            "ID": int(id_func), "Funcionario": nome_func, "Escola": escola,
+            "Total_Dias": 0, "Nao_Apurado": 0, "Faltas": 0, 
+            "Atraso_Horas": 0.0, "Status": "Sem Dados"
+        }
         
+    total_dias = len(dias)
     qtd_nao_apurado = 0
-    qtd_atrasos = 0
     qtd_faltas = 0
-    detalhes_log = []
+    atraso_acumulado_decimal = 0.0
     
     for dia in dias:
-        data_dia = dia.get("DIA", "")
-        
-        # REGRA 1: NÃO APURADO
+        # 1. Contagem de Não Apurados
         if dia.get("ID_DIAAPURADO") == "N":
             qtd_nao_apurado += 1
-            detalhes_log.append(f"{data_dia} (Pendente Apuração)")
             
-        # REGRA 2: FALTAS (FL_DIAS possui valor)
+        # 2. Contagem de Faltas
         fl_dias = dia.get("FL_DIAS")
         if fl_dias is not None and str(fl_dias).strip() != "":
             qtd_faltas += 1
-            detalhes_log.append(f"{data_dia} (Falta)")
-        
-        # REGRA 3: ATRASOS (BH_DESC_DIA < 0)
-        # (Consideramos atraso apenas se não for falta integral)
         else:
+            # 3. Soma de Atrasos (Se não for falta)
             bh_desc = dia.get("BH_DESC_DIA")
             if bh_desc:
                 try:
-                    # Troca vírgula por ponto para converter
+                    # Ex: "-7.71" ou "-0,50" -> converte para float
                     val_str = str(bh_desc).replace(',', '.')
                     valor = float(val_str)
                     if valor < 0:
-                        qtd_atrasos += 1
-                        detalhes_log.append(f"{data_dia} (Atraso: {valor}h)")
+                        atraso_acumulado_decimal += abs(valor) # Soma positivo para o KPI
                 except:
                     pass
 
-    # Se encontrou algum problema, retorna o objeto
-    if qtd_nao_apurado > 0 or qtd_atrasos > 0 or qtd_faltas > 0:
-        return {
-            "ID": int(id_func),
-            "Funcionario": nome_func,
-            "Escola": escola,
-            "Nao_Apurado": qtd_nao_apurado,
-            "Faltas": qtd_faltas,
-            "Atrasos": qtd_atrasos,
-            "Log": "; ".join(detalhes_log)
-        }
-    return None
+    # DEFINIÇÃO DE STATUS
+    status = "✅ OK"
+    if total_dias > 0 and qtd_nao_apurado == total_dias:
+        status = "🚨 PONTO ZERADO (Totalmente Aberto)"
+    elif qtd_nao_apurado > 0:
+        status = "⚠️ Pendente Parcial"
+    
+    # Se tiver muitas faltas (>50%)
+    if total_dias > 0 and (qtd_faltas / total_dias) > 0.5:
+        status = "🔥 Absenteísmo Crítico"
+
+    return {
+        "ID": int(id_func),
+        "Funcionario": nome_func,
+        "Escola": escola,
+        "Total_Dias": total_dias,
+        "Nao_Apurado": qtd_nao_apurado,
+        "Faltas": qtd_faltas,
+        "Atraso_Horas": atraso_acumulado_decimal,
+        "Status": status
+    }
 
 # ==============================================================================
-# 5. INTERFACE (FRONT-END)
+# 6. INTERFACE
 # ==============================================================================
 
-st.title("🕵️‍♀️ Diagnóstico de Apuração de Ponto")
-st.markdown("Auditoria completa de **Faltas**, **Atrasos** e **Dias Não Apurados** via API.")
+st.title("⏱️ Monitoramento de Ponto & Atrasos")
+st.caption("Diagnóstico de performance, atrasos acumulados e dias não apurados.")
 
-# --- SIDEBAR DE FILTROS ---
 with st.sidebar:
-    st.header("⚙️ Parâmetros")
-    
-    # Data usada apenas para buscar quem está ativo na 'Mesa' hoje
-    data_ref = st.date_input("Data Base (Status Ativo)", datetime.now())
-    
-    # Campo para o código do período (ex: 1904)
-    nr_periodo = st.text_input("Cód. Período Apuração", value="1904", help="Ex: 1904. Verifique no Portal Gestor qual o período aberto.")
-    
-    st.info(f"🔑 Operador: {CD_OPERADOR}\n🏢 Org: {NR_ORG}")
-    
+    st.header("Parâmetros")
+    data_ref = st.date_input("Data Base (Ativos)", datetime.now())
+    nr_periodo = st.text_input("Cód. Período", value="1904")
     st.divider()
-    btn_run = st.button("🚀 Executar Diagnóstico", type="primary", use_container_width=True)
+    btn_run = st.button("🚀 Processar Agora", type="primary", use_container_width=True)
 
-# --- EXECUÇÃO ---
 if btn_run:
     if not nr_periodo:
-        st.error("Informe o Código do Período de Apuração.")
+        st.error("Informe o Código do Período.")
         st.stop()
         
-    # 1. Busca lista de funcionários
-    with st.status("🔄 Conectando ao Portal Gestor...", expanded=True) as status:
-        status.write("Obtendo lista de colaboradores ativos...")
-        df_funcionarios = fetch_lista_funcionarios(data_ref)
+    with st.status("🔄 Executando varredura rápida...", expanded=True) as status:
+        # 1. LISTA
+        status.write("Obtendo funcionários em Atividade Normal...")
+        df_funcionarios = fetch_lista_funcionarios_ativos(data_ref)
         
         if df_funcionarios.empty:
-            status.update(label="❌ Erro: Nenhum funcionário encontrado ou falha na API.", state="error")
+            status.update(label="❌ Ninguém encontrado.", state="error")
             st.stop()
             
-        total_funcs = len(df_funcionarios)
-        status.write(f"✅ Lista carregada: **{total_funcs}** colaboradores.")
-        status.write("🔍 Analisando cartões de ponto individualmente (Multithreading)...")
+        total = len(df_funcionarios)
+        status.write(f"✅ {total} colaboradores listados.")
+        status.write("🚀 Baixando cartões de ponto (25 conexões simultâneas)...")
         
-        # 2. Processamento Paralelo (rápido)
+        # 2. PROCESSAMENTO (25 WORKERS PARA VELOCIDADE)
         resultados = []
-        progress_bar = st.progress(0)
+        pbar = st.progress(0)
         
-        # Max Workers = 10 requisições simultâneas
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
             futures = {executor.submit(analisar_funcionario, row, nr_periodo): row for _, row in df_funcionarios.iterrows()}
-            
-            concluidos = 0
+            done = 0
             for future in concurrent.futures.as_completed(futures):
                 res = future.result()
-                if res:
-                    resultados.append(res)
-                
-                concluidos += 1
-                progress_bar.progress(concluidos / total_funcs)
+                resultados.append(res)
+                done += 1
+                pbar.progress(done / total)
         
-        status.update(label="✅ Diagnóstico Finalizado!", state="complete", expanded=False)
+        status.update(label="Concluído!", state="complete", expanded=False)
 
-    # 3. Resultados
+    # 3. TRATAMENTO DOS DADOS
+    df = pd.DataFrame(resultados)
+    
+    # Coluna Formatada de Horas
+    df['Tempo Atraso'] = df['Atraso_Horas'].apply(decimal_para_hora_str)
+    
+    # KPIs GERAIS
+    total_funcs = len(df)
+    total_ok = len(df[ (df['Nao_Apurado'] == 0) & (df['Status'] != "Sem Dados") ])
+    total_zerados = len(df[df['Status'].str.contains("PONTO ZERADO")])
+    total_criticos = len(df[ (df['Faltas'] / df['Total_Dias'].replace(0,1)) > 0.5 ])
+    
+    perc_apurado = (total_ok / total_funcs * 100) if total_funcs > 0 else 0
+    
+    # DISPLAY KPIs
+    st.markdown("### 📊 Visão Geral do Período")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Total Analisado", total_funcs)
+    k2.metric("Totalmente Apurados", f"{total_ok} ({perc_apurado:.1f}%)", help="Funcionários com zero dias pendentes.")
+    k3.metric("Ponto Zerado (Em Branco)", total_zerados, delta_color="inverse", help="Funcionários que não tiveram NENHUM dia apurado.")
+    k4.metric("Absenteísmo Crítico (>50%)", total_criticos, delta_color="inverse")
+    
     st.divider()
     
-    if resultados:
-        df_res = pd.DataFrame(resultados)
-        
-        # Ordenar por criticidade (Faltas > Não Apurado > Atrasos)
-        df_res = df_res.sort_values(by=['Faltas', 'Nao_Apurado', 'Atrasos'], ascending=False)
-        
-        # Placar Geral
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Funcionários c/ Ocorrência", len(df_res))
-        col2.metric("Total Faltas", df_res['Faltas'].sum())
-        col3.metric("Dias Pendentes (N. Apurado)", df_res['Nao_Apurado'].sum())
-        col4.metric("Ocorrências de Atraso", df_res['Atrasos'].sum())
-        
-        st.subheader("📋 Detalhamento")
+    # ABAS PARA ORGANIZAÇÃO
+    tab1, tab2, tab3, tab4 = st.tabs(["📉 Ranking de Atrasos", "🚨 Pendências de Apuração", "🔥 Absenteísmo Alto", "📋 Lista Geral"])
+    
+    with tab1:
+        st.subheader("Top Atrasos Acumulados (Horas)")
+        # Filtra quem tem atraso > 0 e ordena
+        df_atrasos = df[df['Atraso_Horas'] > 0].sort_values(by='Atraso_Horas', ascending=False)
         
         st.dataframe(
-            df_res,
+            df_atrasos[['ID', 'Funcionario', 'Escola', 'Tempo Atraso', 'Faltas']],
             use_container_width=True,
             hide_index=True,
             column_config={
                 "ID": st.column_config.NumberColumn("Matrícula", format="%d"),
-                "Funcionario": st.column_config.TextColumn("Colaborador"),
-                "Nao_Apurado": st.column_config.ProgressColumn("Pendências", format="%d", min_value=0, max_value=30),
-                "Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
-                "Atrasos": st.column_config.NumberColumn("Atrasos", format="%d ⚠️"),
-                "Log": st.column_config.TextColumn("Detalhes (Datas)", width="large")
+                "Tempo Atraso": st.column_config.TextColumn("Tempo Total", help="Soma das horas negativas convertidas."),
+                "Faltas": st.column_config.NumberColumn("Qtd. Faltas")
+            }
+        )
+    
+    with tab2:
+        st.subheader("Dias Não Apurados / Ponto em Branco")
+        # Filtra quem tem pendencia
+        df_pend = df[df['Nao_Apurado'] > 0].sort_values(by=['Nao_Apurado'], ascending=False)
+        
+        st.dataframe(
+            df_pend[['ID', 'Funcionario', 'Escola', 'Status', 'Nao_Apurado', 'Total_Dias']],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Nao_Apurado": st.column_config.ProgressColumn("Dias Pendentes", format="%d", min_value=0, max_value=30),
+                "Status": st.column_config.TextColumn("Diagnóstico")
             }
         )
         
-        # Download
-        csv = df_res.to_csv(index=False, sep=';', encoding='utf-8-sig')
-        st.download_button(
-            label="📥 Baixar Relatório (CSV)",
-            data=csv,
-            file_name=f"diagnostico_periodo_{nr_periodo}_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv"
+    with tab3:
+        st.subheader("Funcionários com > 50% de Falta")
+        df_crit = df[ (df['Faltas'] / df['Total_Dias'].replace(0,1)) > 0.5 ].sort_values(by='Faltas', ascending=False)
+        st.dataframe(
+            df_crit[['ID', 'Funcionario', 'Escola', 'Faltas', 'Total_Dias', 'Tempo Atraso']],
+            use_container_width=True,
+            hide_index=True
         )
+
+    with tab4:
+        st.subheader("Base Completa")
+        st.dataframe(df, use_container_width=True, hide_index=True)
         
-    else:
-        st.balloons()
-        st.success(f"🎉 Tudo limpo! Nenhuma pendência encontrada para os {total_funcs} funcionários no período {nr_periodo}.")
+        csv = df.to_csv(index=False, sep=';', encoding='utf-8-sig')
+        st.download_button("📥 Baixar Planilha Completa", csv, "diagnostico_ponto.csv", "text/csv")
