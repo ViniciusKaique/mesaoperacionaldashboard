@@ -271,8 +271,11 @@ if btn_buscar:
     ocorrencias_filtradas = pd.DataFrame()
     
     if not df_ocorrencias.empty:
-        # Remove ocorrências onde DATA_INICIO_FILTER == Hoje
+        # Padroniza string de data para filtro
         df_ocorrencias['DATA_INICIO_FILTER'] = df_ocorrencias['DATA_INICIO_FILTER'].astype(str)
+        # Padroniza tipo de ocorrencia para evitar erro de espaco
+        df_ocorrencias['TIPO_OCORRENCIA'] = df_ocorrencias['TIPO_OCORRENCIA'].str.strip().str.upper()
+        
         qtd_antes = len(df_ocorrencias)
         ocorrencias_filtradas = df_ocorrencias[df_ocorrencias['DATA_INICIO_FILTER'] != hoje_str].copy()
         qtd_depois = len(ocorrencias_filtradas)
@@ -280,47 +283,47 @@ if btn_buscar:
         if qtd_antes > qtd_depois:
             st.toast(f"ℹ️ {qtd_antes - qtd_depois} ocorrências de hoje ({hoje_str}) foram ignoradas.")
     
-    # 2. SEPARAÇÃO E CÁLCULOS
+    # 2. SEPARAÇÃO E CÁLCULOS (ESTRATÉGIA DE ISOLAMENTO TOTAL)
     if ocorrencias_filtradas.empty:
         st.success("🎉 Nenhuma falta ou atraso encontrado (exceto hoje)!")
     else:
-        # Garante que DIFF_HOURS seja numérico
+        # Garante numérico e strings
         ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
         ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
-        
-        # Nomes e Escolas
         ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
         ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
         
         # ======================================================================
-        # CÁLCULOS SEPARADOS (CORREÇÃO DE SOMA)
+        # LÓGICA DE SEPARAÇÃO BLINDADA
         # ======================================================================
         
-        # A) FALTAS: Remove linhas duplicadas de dia para o mesmo vínculo para contar DIAS
-        df_faltas_unique = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO'])
-        s_faltas = df_faltas_unique.groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+        # A) ISOLAR DATAFRAME APENAS DE FALTAS
+        df_only_faltas = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].copy()
+        # Remove duplicidade de DIA para não contar falta picada
+        df_only_faltas_dedup = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO'])
+        # Conta
+        s_faltas = df_only_faltas_dedup.groupby('NRVINCULOM').size().rename('Qtd_Faltas')
         
-        # B) ATRASOS: Mantém TODAS as linhas e SOMA as horas
-        df_atrasos_all = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO']
-        s_atrasos = df_atrasos_all.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
+        # B) ISOLAR DATAFRAME APENAS DE ATRASOS
+        df_only_atrasos = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
+        # Soma (Aqui NÃO removemos duplicatas pois queremos acumular horas)
+        s_atrasos = df_only_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
         
-        # C) DATAS: Lista todas as datas de problemas
+        # C) DATAS (União visual das datas de ambos)
         s_datas = ocorrencias_filtradas.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
         
-        # D) CONSOLIDAÇÃO: Pega lista única de pessoas com problema e junta os dados
-        # Cria um DF base apenas com os IDs que tiveram algum problema
-        df_base_agg = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
+        # D) DATAFRAME BASE (Para unir tudo)
+        df_base_funcionarios = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
         
-        # Join (Left join na base de problemas)
-        resumo = df_base_agg.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
+        # E) JOIN FINAL
+        resumo = df_base_funcionarios.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
         
-        # Formatação Visual
+        # Formatação
         resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-        # 3. IDENTIFICAR "SEM OCORRÊNCIAS"
+        # 3. IDENTIFICAR "PONTO EXCELENTE" (Quem não está no resumo)
         ids_com_problema = set(resumo['NRVINCULOM'].unique())
-        # Filtra do DF original (Portal Gestor) quem não está na lista de problemas
         df_sem_ocorrencias = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
         df_sem_ocorrencias = df_sem_ocorrencias[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(
             columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'}
@@ -339,7 +342,6 @@ if btn_buscar:
         
         with tab1:
             st.subheader("Quem mais faltou no período")
-            # Filtra quem tem pelo menos 1 falta
             df_faltas_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
             st.dataframe(
                 df_faltas_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
@@ -350,7 +352,6 @@ if btn_buscar:
             
         with tab2:
             st.subheader("Quem tem mais horas de atraso")
-            # Filtra quem tem atraso (>0)
             df_atrasos_show = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
             st.dataframe(
                 df_atrasos_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
