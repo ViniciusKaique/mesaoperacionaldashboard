@@ -1,3 +1,22 @@
+Diretamente pelo navegador (clicando no link), **não é possível**.
+
+**Por que?**
+Quando você clica em um link `https://...` no navegador, ele tenta abrir a página "pelada", sem nenhuma senha. A API da Teknisa exige que as senhas (Tokens e Hashs) sejam enviadas no "cabeçalho" (Header) da requisição, algo que o navegador não faz sozinho num clique simples.
+
+**A Solução (O "Pulo do Gato"):**
+Em vez de mandar o usuário para um link que vai dar erro, nós faremos o **Python (que tem as credenciais do `secrets.toml`)** buscar esses dados e abrir uma **Janela (Pop-up)** dentro do próprio Streamlit com as informações.
+
+Aqui está o código **completo e corrigido** para o arquivo `pages/DIAGNOSTICO_PONTO.py`.
+
+### O que mudou neste código:
+
+1. **Sem Links Quebrados:** Removi a coluna de link que dava erro 403.
+2. **Clique na Tabela:** Agora, ao clicar em uma linha da tabela (Faltas ou Atrasos), o sistema captura o ID.
+3. **Janela Modal:** Abre automaticamente um **Pop-up (`st.dialog`)** mostrando o espelho de ponto detalhado daquela pessoa, buscado pelo Python usando suas credenciais seguras.
+
+Copie e substitua todo o arquivo:
+
+```python
 import streamlit as st
 import requests
 import pandas as pd
@@ -169,7 +188,7 @@ def fetch_periodos_apuracao():
     return pd.DataFrame()
 
 # ==============================================================================
-# 5. API HCM
+# 5. API HCM - OCORRÊNCIAS
 # ==============================================================================
 def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competencia):
     url = "https://hcm.teknisa.com/backend/index.php/getMarcacaoPontoOcorrencias"
@@ -201,6 +220,39 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
         st.error(f"Erro na requisição: {e}")
     return pd.DataFrame()
 
+# ==============================================================================
+# 6. API HCM - DETALHES DO PONTO (ESPELHO) - AQUI ESTÁ O SEGREDO
+# ==============================================================================
+@st.cache_data(ttl=300)
+def fetch_dias_demonstrativo(vinculo, periodo):
+    """ 
+    Busca os dados usando AS CREDENCIAIS DO PYTHON (Secrets) 
+    e retorna o DataFrame para ser exibido na tela.
+    """
+    url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
+    params = {
+        "requestType": "FilterData",
+        "NRVINCULOM": vinculo,
+        "NRPERIODOAPURACAO": periodo,
+        "NRORG": PG_NR_ORG,
+        "CDOPERADOR": PG_CD_OPERADOR
+    }
+    # Aqui inserimos os Headers de segurança que o navegador não tem
+    headers = {
+        "OAuth-Token": PG_TOKEN, 
+        "OAuth-Cdoperador": PG_CD_OPERADOR, 
+        "OAuth-Nrorg": PG_NR_ORG,
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            if "dataset" in data and "data" in data["dataset"]:
+                return pd.DataFrame(data["dataset"]["data"])
+    except: pass
+    return pd.DataFrame()
+
 def decimal_para_hora(val):
     try:
         if pd.isna(val) or val == 0: return "00:00"
@@ -210,7 +262,7 @@ def decimal_para_hora(val):
     except: return "00:00"
 
 # ==============================================================================
-# 6. INTERFACE
+# 7. INTERFACE
 # ==============================================================================
 
 st.title("⚡ Relatório Turbo - Faltas e Atrasos (HCM)")
@@ -240,6 +292,39 @@ with st.sidebar:
     st.divider()
     btn_buscar = st.button("🚀 Disparar Análise", use_container_width=True)
 
+# --- FUNÇÃO PARA ABRIR O MODAL ---
+@st.dialog("📅 Espelho de Ponto (Detalhado)", width="large")
+def mostrar_espelho_modal(nome, vinculo, periodo):
+    st.write(f"**Funcionário:** {nome}")
+    st.caption(f"Matrícula: {vinculo} | Período ID: {periodo}")
+    
+    with st.spinner("Buscando batidas no sistema..."):
+        # O Python busca os dados com as credenciais
+        df_espelho = fetch_dias_demonstrativo(vinculo, periodo)
+    
+    if not df_espelho.empty:
+        # Colunas mais úteis para exibir
+        cols_show = ['DTAPURACAO', 'DSPONTODIA', 'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2', 'ENTRADA_SAIDA_3', 'QTHORASREALIZADAS', 'QTHORASABONADAS', 'QTHORASFALTAS']
+        # Filtra só as que existem
+        cols_final = [c for c in cols_show if c in df_espelho.columns]
+        
+        st.dataframe(
+            df_espelho[cols_final],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "DTAPURACAO": st.column_config.TextColumn("Data"),
+                "DSPONTODIA": st.column_config.TextColumn("Situação", width="medium"),
+                "QTHORASFALTAS": st.column_config.NumberColumn("Faltas (h)", format="%.2f"),
+                "QTHORASREALIZADAS": st.column_config.NumberColumn("Trab (h)", format="%.2f"),
+                "ENTRADA_SAIDA_1": "E1/S1",
+                "ENTRADA_SAIDA_2": "E2/S2",
+                "ENTRADA_SAIDA_3": "E3/S3"
+            }
+        )
+    else:
+        st.warning("⚠️ Não foi possível carregar o espelho. Verifique se há dados para este período.")
+
 if btn_buscar:
     with st.status("🔄 Analisando...", expanded=True) as status:
         # 1. LISTA DE ATIVOS
@@ -264,109 +349,109 @@ if btn_buscar:
         df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
         status.update(label="Sucesso!", state="complete", expanded=False)
 
-    # --- PROCESSAMENTO INTELIGENTE ---
-    
-    # 1. FILTRO DE DATA VIGENTE (HOJE)
+    # --- PROCESSAMENTO ---
     hoje_str = datetime.now().strftime('%Y-%m-%d')
     ocorrencias_filtradas = pd.DataFrame()
     
     if not df_ocorrencias.empty:
-        # Padroniza string de data para filtro
         df_ocorrencias['DATA_INICIO_FILTER'] = df_ocorrencias['DATA_INICIO_FILTER'].astype(str)
-        # Padroniza tipo de ocorrencia para evitar erro de espaco
         df_ocorrencias['TIPO_OCORRENCIA'] = df_ocorrencias['TIPO_OCORRENCIA'].str.strip().str.upper()
         
         qtd_antes = len(df_ocorrencias)
         ocorrencias_filtradas = df_ocorrencias[df_ocorrencias['DATA_INICIO_FILTER'] != hoje_str].copy()
-        qtd_depois = len(ocorrencias_filtradas)
         
-        if qtd_antes > qtd_depois:
-            st.toast(f"ℹ️ {qtd_antes - qtd_depois} ocorrências de hoje ({hoje_str}) foram ignoradas.")
+        if qtd_antes > len(ocorrencias_filtradas):
+            st.toast(f"ℹ️ Ocorrências de hoje ({hoje_str}) foram ignoradas.")
     
-    # 2. SEPARAÇÃO E CÁLCULOS (ESTRATÉGIA DE ISOLAMENTO TOTAL)
     if ocorrencias_filtradas.empty:
         st.success("🎉 Nenhuma falta ou atraso encontrado (exceto hoje)!")
     else:
-        # Garante numérico e strings
         ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
         ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
         ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
         ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
         
-        # ======================================================================
-        # LÓGICA DE SEPARAÇÃO BLINDADA
-        # ======================================================================
-        
-        # A) ISOLAR DATAFRAME APENAS DE FALTAS
+        # Separa Faltas e Atrasos
         df_only_faltas = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].copy()
-        # Remove duplicidade de DIA para não contar falta picada
-        df_only_faltas_dedup = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO'])
-        # Conta
-        s_faltas = df_only_faltas_dedup.groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+        s_faltas = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
         
-        # B) ISOLAR DATAFRAME APENAS DE ATRASOS
         df_only_atrasos = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
-        # Soma (Aqui NÃO removemos duplicatas pois queremos acumular horas)
         s_atrasos = df_only_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
         
-        # C) DATAS (União visual das datas de ambos)
         s_datas = ocorrencias_filtradas.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
         
-        # D) DATAFRAME BASE (Para unir tudo)
-        df_base_funcionarios = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
+        df_base = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
+        resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
         
-        # E) JOIN FINAL
-        resumo = df_base_funcionarios.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
-        
-        # Formatação
         resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-        # 3. IDENTIFICAR "PONTO EXCELENTE" (Quem não está no resumo)
+        # KPIs
         ids_com_problema = set(resumo['NRVINCULOM'].unique())
-        df_sem_ocorrencias = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
-        df_sem_ocorrencias = df_sem_ocorrencias[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(
-            columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'}
-        )
+        df_sem = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)]
 
-        # --- EXIBIÇÃO ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Analisado", len(df_funcionarios))
-        k2.metric("✅ Ponto Excelente", len(df_sem_ocorrencias), delta_color="normal")
-        k3.metric("Com Faltas/Atrasos", len(resumo), delta_color="inverse")
-        k4.metric("Faltas Totais (Dias)", resumo['Qtd_Faltas'].sum())
+        k2.metric("✅ Ponto Excelente", len(df_sem), delta_color="normal")
+        k3.metric("Com Ocorrências", len(resumo), delta_color="inverse")
+        k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
         
         st.divider()
-        
+        st.info("💡 **Dica:** Clique em uma linha da tabela para abrir o espelho de ponto detalhado.")
+
         tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
         
+        # --- TAB 1: FALTAS (COM CLIQUE) ---
         with tab1:
-            st.subheader("Quem mais faltou no período")
-            df_faltas_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
-            st.dataframe(
-                df_faltas_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Qtd_Faltas": st.column_config.NumberColumn("Qtd. Dias Falta", format="%d ❌")}
-            )
+            if not resumo.empty:
+                df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+                # selection_mode="single-row" ativa a seleção
+                event1 = st.dataframe(
+                    df_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
+                    use_container_width=True, hide_index=True,
+                    selection_mode="single-row", on_select="rerun", key="grid_faltas",
+                    column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias Falta", format="%d ❌")}
+                )
+                # Se clicou na linha
+                if len(event1.selection.rows) > 0:
+                    idx_visual = event1.selection.rows[0] # Índice visual (0, 1, 2...)
+                    row_data = df_show.iloc[idx_visual]   # Pega os dados reais
+                    mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao)
+
+            else: st.info("Sem faltas.")
             
+        # --- TAB 2: ATRASOS (COM CLIQUE) ---
         with tab2:
-            st.subheader("Quem tem mais horas de atraso")
-            df_atrasos_show = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
-            st.dataframe(
-                df_atrasos_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
-            )
-            
+            if not resumo.empty:
+                df_show2 = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+                event2 = st.dataframe(
+                    df_show2[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
+                    use_container_width=True, hide_index=True,
+                    selection_mode="single-row", on_select="rerun", key="grid_atrasos",
+                    column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
+                )
+                if len(event2.selection.rows) > 0:
+                    idx_visual = event2.selection.rows[0]
+                    row_data = df_show2.iloc[idx_visual]
+                    mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao)
+
+            else: st.info("Sem atrasos.")
+
+        # --- TAB 3: SEM OCORRÊNCIAS ---
         with tab3:
-            st.subheader(f"✅ Ponto Excelente ({len(df_sem_ocorrencias)})")
-            st.caption("Colaboradores ativos sem nenhuma falta ou atraso registrado no período (descontando hoje).")
-            st.dataframe(df_sem_ocorrencias, use_container_width=True, hide_index=True)
-            
+            st.dataframe(df_sem[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']], use_container_width=True, hide_index=True)
+
+        # --- TAB 4: GERAL (COM CLIQUE) ---
         with tab4:
-            st.subheader("Tabela Geral Consolidada")
-            st.dataframe(resumo, use_container_width=True, hide_index=True)
-            csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-            st.download_button("📥 Baixar Planilha", csv, f"hcm_relatorio_{periodo_apuracao}.csv", "text/csv")
+            if not resumo.empty:
+                event4 = st.dataframe(
+                    resumo, use_container_width=True, hide_index=True,
+                    selection_mode="single-row", on_select="rerun", key="grid_geral"
+                )
+                if len(event4.selection.rows) > 0:
+                    idx_visual = event4.selection.rows[0]
+                    row_data = resumo.iloc[idx_visual]
+                    mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao)
+                
+                csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
+                st.download_button("📥 Baixar CSV", csv, "relatorio.csv", "text/csv")
