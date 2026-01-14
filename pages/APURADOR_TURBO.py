@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ==============================================================================
 st.set_page_config(page_title="HCM - Apurador Turbo", layout="wide", page_icon="🚀")
 
-# CSS para ajustar visualização
+# CSS para ajustes visuais
 st.markdown("""
     <style>
     div[data-testid="stMetricValue"] { font-size: 1.4rem; }
@@ -23,7 +23,7 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# Carrega secrets (Oculto do usuário) 
+# --- CARREGAR CREDENCIAIS (DIRETO DO SECRETS) ---
 try:
     SECRETS_PG = st.secrets["api_portal_gestor"]
     PG_TOKEN = SECRETS_PG["token_fixo"]
@@ -38,7 +38,7 @@ except Exception as e:
 # ==============================================================================
 
 def get_headers():
-    """ Headers padronizados conforme DIAGNOSTICO_PONTO [cite: 12] """
+    """ Headers padronizados usando as credenciais do secrets """
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Content-Type": "application/json",
@@ -50,7 +50,7 @@ def get_headers():
 
 @st.cache_data(ttl=3600) 
 def fetch_periodos_apuracao():
-    """ Busca períodos disponíveis (Igual ao Diagnóstico)  """
+    """ Busca períodos disponíveis (Igual ao Diagnóstico) """
     url = "https://portalgestor.teknisa.com/backend/index.php/getPeriodosDemonstrativo"
     params = { 
         "requestType": "FilterData", 
@@ -61,7 +61,6 @@ def fetch_periodos_apuracao():
         r = requests.get(url, params=params, headers=get_headers(), timeout=10)
         if r.status_code == 200:
             data = r.json()
-            # Padrão de retorno Teknisa [cite: 15]
             if "dataset" in data and "data" in data["dataset"]:
                 return pd.DataFrame(data["dataset"]["data"])
     except: pass
@@ -69,8 +68,8 @@ def fetch_periodos_apuracao():
 
 def buscar_vinculos_para_apuracao(nr_periodo, nr_estrut):
     """ 
-    Busca vínculos. Usa getVinculosDoGestor para garantir o período todo,
-    mas aplica o parser genérico do Diagnóstico ('dataset' -> 'data') para corrigir o erro.
+    Busca vínculos do período. 
+    CORREÇÃO: Tenta ler 'getVinculosDoGestor' E 'data' para evitar lista vazia.
     """
     url = "https://portalgestor.teknisa.com/backend/index.php/getVinculosDoGestor"
     params = {
@@ -85,24 +84,21 @@ def buscar_vinculos_para_apuracao(nr_periodo, nr_estrut):
         r = requests.get(url, params=params, headers=get_headers(), timeout=30)
         if r.status_code == 200:
             data = r.json()
-            
-            # Tenta extrair lista de várias formas comuns da API Teknisa
             dataset = data.get("dataset", {})
             
-            # 1. Tentativa padrão 'getVinculosDoGestor'
+            lista = []
+            # TENTATIVA 1: Padrão getVinculosDoGestor
             if isinstance(dataset, dict) and "getVinculosDoGestor" in dataset:
                  lista = dataset["getVinculosDoGestor"]
-            # 2. Tentativa padrão Diagnóstico 'data' [cite: 13]
+            # TENTATIVA 2: Padrão data (comum em outras rotas)
             elif isinstance(dataset, dict) and "data" in dataset:
                  lista = dataset["data"]
-            # 3. Se o dataset já for a lista
+            # TENTATIVA 3: O próprio dataset é a lista
             elif isinstance(dataset, list):
                  lista = dataset
-            else:
-                 lista = []
 
-            # Retorna sem filtro de atividade normal (conforme solicitado)
-            return lista
+            # Retorna a lista completa SEM FILTRO de situação
+            return lista if lista else []
             
     except Exception as e:
         st.error(f"Erro na busca: {e}")
@@ -124,6 +120,7 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
     try:
         r = session.post(endpoint, headers=headers, json=payload, timeout=25)
         
+        # SUCESSO 200
         if r.status_code == 200:
             resp = r.json()
             dados = resp.get("dataset", {}).get("data", {}).get("apurarPeriodo", {})
@@ -133,6 +130,7 @@ def executar_apuracao_individual(session, url_base, headers, vinculo, nr_periodo
                 infos = resp.get("dataset", {}).get("data", {}).get("info", [])
                 return "FALHA_LOGICA", "Não apurado (Flag False)", str(infos)
 
+        # ERRO 500 (Regra de Negócio)
         elif r.status_code == 500:
             try:
                 err_json = r.json()
@@ -158,43 +156,46 @@ if "lista_funcionarios" not in st.session_state:
 if "resultado_apuracao" not in st.session_state:
     st.session_state["resultado_apuracao"] = []
 
-# --- SIDEBAR LIMPA ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Parâmetros")
     
-    # Seleção de Período (Igual Diagnóstico) 
+    # 1. SELEÇÃO DE PERÍODO (EM LISTA)
     df_periodos = fetch_periodos_apuracao()
     if not df_periodos.empty:
-        # Cria label amigável
+        # Cria label amigável: "Descrição (Código)"
         periodo_fmt = df_periodos.apply(lambda x: f"{x['DSPERIODOAPURACAO']} (Cód: {x['NRPERIODOAPURACAO']})", axis=1)
         opcao = st.selectbox("Selecione o Período:", periodo_fmt)
         
-        # Extrai o código do período da seleção
+        # Recupera o código do período selecionado
         idx = periodo_fmt[periodo_fmt == opcao].index[0]
         nr_periodo = df_periodos.iloc[idx]['NRPERIODOAPURACAO']
     else:
+        # Fallback caso a API de períodos falhe
         nr_periodo = st.text_input("Período Apuração (Cód)", value="1904")
     
     st.divider()
     
+    # 2. OUTROS PARÂMETROS
     nr_estrutura = st.text_input("Estrutura (NRESTRUTURAM)", value="101091998")
-    threads = st.slider("Velocidade (Threads)", 1, 200, 5)
+    threads = st.slider("Velocidade (Threads)", 1, 10, 5)
     
     st.divider()
     
-    if st.button("🔄 Carregar Lista", use_container_width=True):
+    # 3. BOTÃO DE CARREGAR
+    if st.button("🔄 Carregar Lista do Quadro", use_container_width=True):
         st.session_state["lista_funcionarios"] = []
         st.session_state["resultado_apuracao"] = []
         
-        with st.spinner(f"Buscando vínculos no período {nr_periodo}..."):
+        with st.spinner(f"Buscando todos os vínculos no período {nr_periodo}..."):
             res = buscar_vinculos_para_apuracao(nr_periodo, nr_estrutura)
             st.session_state["lista_funcionarios"] = res
             
             if not res:
                 st.error("Nenhum registro encontrado.")
-                st.info("Dica: Verifique se o código da Estrutura (NRESTRUTURAM) está correto para o Gestor configurado.")
+                st.info("Verifique se o código da Estrutura (NRESTRUTURAM) condiz com o usuário configurado.")
             else:
-                st.success(f"Encontrados: {len(res)}")
+                st.success(f"Encontrados: {len(res)} vínculos (Total)")
 
 # ==============================================================================
 # 5. EXECUÇÃO
@@ -204,7 +205,7 @@ if st.session_state["lista_funcionarios"]:
     df_lista = pd.DataFrame(st.session_state["lista_funcionarios"])
     
     with st.expander(f"📋 Lista Carregada ({len(df_lista)} vínculos) - Clique para ver", expanded=False):
-        # Tenta exibir colunas amigáveis se existirem
+        # Mostra colunas relevantes se existirem
         cols_possiveis = ['NRVINCULOM', 'NMVINCULOM', 'NMSITUFUNCH', 'NMFUNCAO']
         cols_show = [c for c in cols_possiveis if c in df_lista.columns]
         st.dataframe(df_lista[cols_show] if cols_show else df_lista, use_container_width=True, hide_index=True)
