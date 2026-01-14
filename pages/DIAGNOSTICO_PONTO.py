@@ -1,17 +1,14 @@
 import streamlit as st
-import pandas as pd
 import requests
-import concurrent.futures
+import pandas as pd
+import pytz
 from datetime import datetime
+from sqlalchemy import text
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-st.set_page_config(
-    page_title="Auditoria de Ponto",
-    page_icon="🕵️‍♂️",
-    layout="wide"
-)
+st.set_page_config(page_title="HCM - Ocorrências", layout="wide", page_icon="🚨")
 
 # ==============================================================================
 # 2. SEGURANÇA E CREDENCIAIS
@@ -20,46 +17,134 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
+# --- CREDENCIAIS HCM (Para buscar as ocorrências) ---
 try:
-    api_creds = st.secrets["api_portal_gestor"]
-    TOKEN_FIXO = api_creds["token_fixo"]
-    CD_OPERADOR = api_creds["cd_operador"]
-    NR_ORG = api_creds["nr_org"]
+    SECRETS_HCM = st.secrets["hcm_api"]
+    HCM_USER = SECRETS_HCM["usuario"]
+    HCM_PASS = SECRETS_HCM["senha"]
+    HCM_HASH = SECRETS_HCM["hash_sessao"]
+    HCM_UID_BROWSER = SECRETS_HCM["user_id_browser"]
+    HCM_PROJECT = SECRETS_HCM.get("project_id", "750")
 except Exception as e:
-    st.error("⚠️ Erro de Configuração: Credenciais não encontradas no secrets.toml.")
+    st.error(f"⚠️ Erro Config HCM: {e}")
+    st.stop()
+
+# --- CREDENCIAIS PORTAL GESTOR (Para buscar a lista de IDs) ---
+try:
+    SECRETS_PG = st.secrets["api_portal_gestor"]
+    PG_TOKEN = SECRETS_PG["token_fixo"]
+    PG_CD_OPERADOR = SECRETS_PG["cd_operador"]
+    PG_NR_ORG = SECRETS_PG["nr_org"]
+except Exception as e:
+    st.error(f"⚠️ Erro Config Portal Gestor: {e}")
     st.stop()
 
 # ==============================================================================
-# 3. FUNÇÕES AUXILIARES
+# 3. GESTÃO DE SESSÃO HCM (CACHE EM BANCO)
 # ==============================================================================
-def decimal_para_hora_str(valor_decimal):
-    if not valor_decimal: return "00:00"
-    horas = int(valor_decimal)
-    minutos = int((valor_decimal - horas) * 60)
-    return f"{horas:02d}:{minutos:02d}"
+def get_data_brasil():
+    return datetime.now(pytz.timezone('America/Sao_Paulo'))
 
-# ==============================================================================
-# 4. FUNÇÕES DE API
-# ==============================================================================
+def init_db_token():
+    conn = st.connection("postgres", type="sql")
+    try:
+        with conn.session as session:
+            session.execute(text("""
+                CREATE TABLE IF NOT EXISTS public."HCMTokens" (
+                    id VARCHAR(50) PRIMARY KEY,
+                    access_token TEXT,
+                    user_uid TEXT,
+                    updated_at TIMESTAMP
+                );
+            """))
+            session.commit()
+    except: pass
+    return conn
 
-def fetch_lista_funcionarios_ativos(data_ref):
-    url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
-    data_str = data_ref.strftime("%d/%m/%Y")
+def get_token_db(conn):
+    try:
+        df = conn.query("SELECT access_token, user_uid FROM public.\"HCMTokens\" WHERE id = 'bot_hcm_contact'", ttl=0)
+        if not df.empty: return df.iloc[0]['access_token'], df.iloc[0]['user_uid']
+    except: pass
+    return None, None
+
+def save_token_db(conn, token, uid):
+    try:
+        with conn.session as session:
+            query = text("""
+                INSERT INTO public."HCMTokens" (id, access_token, user_uid, updated_at)
+                VALUES ('bot_hcm_contact', :token, :uid, :hora)
+                ON CONFLICT (id) DO UPDATE 
+                SET access_token = EXCLUDED.access_token, user_uid = EXCLUDED.user_uid, updated_at = EXCLUDED.updated_at;
+            """)
+            session.execute(query, {"token": token, "uid": uid, "hora": get_data_brasil()})
+            session.commit()
+    except: pass
+
+def login_hcm_novo():
+    url = "https://hcm.teknisa.com/backend_login/index.php/login"
+    headers = {
+        "User-Agent": "Mozilla/5.0", "Content-Type": "application/json",
+        "Origin": "https://hcm.teknisa.com", "Referer": "https://hcm.teknisa.com/login/",
+        "User-Id": HCM_UID_BROWSER
+    }
+    payload = {
+        "disableLoader": False,
+        "filter": [
+            {"name": "EMAIL", "operator": "=", "value": HCM_USER},
+            {"name": "PASSWORD", "operator": "=", "value": HCM_PASS},
+            {"name": "PRODUCT_ID", "operator": "=", "value": int(HCM_PROJECT)},
+            {"name": "HASH", "operator": "=", "value": HCM_HASH},
+            {"name": "KEEP_CONNECTED", "operator": "=", "value": "S"}
+        ],
+        "page": 1, "requestType": "FilterData",
+        "origin": {"containerName": "AUTHENTICATION", "widgetName": "LOGIN"}
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=20)
+        data = r.json()
+        if "dataset" in data and "userData" in data["dataset"]:
+            return data["dataset"]["userData"].get("TOKEN"), data["dataset"]["userData"].get("USER_ID")
+    except: pass
+    return None, None
+
+def obter_sessao_hcm():
+    conn = init_db_token()
+    token, uid = get_token_db(conn)
     
+    # Validação simples
+    if token:
+        headers = {
+            "OAuth-Token": token, "OAuth-Hash": HCM_HASH, "User-Id": HCM_UID_BROWSER,
+            "OAuth-Project": HCM_PROJECT, "Content-Type": "application/json"
+        }
+        try:
+            r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json={"page":1,"itemsPerPage":1,"requestType":"FilterData"}, timeout=5)
+            if r.status_code == 200: return token
+        except: pass
+    
+    # Se falhou, renova
+    new_token, new_uid = login_hcm_novo()
+    if new_token:
+        save_token_db(conn, new_token, new_uid)
+        return new_token
+    return None
+
+# ==============================================================================
+# 4. API PORTAL GESTOR (Buscar IDs)
+# ==============================================================================
+def fetch_ids_portal_gestor(data_ref):
+    """Busca lista de funcionários ativos no Portal Gestor para pegar os IDs (NRVINCULOM)"""
+    url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
     params = {
         "requestType": "FilterData",
-        "DIA": data_str,
+        "DIA": data_ref.strftime("%d/%m/%Y"),
         "NRESTRUTURAM": "101091998",
-        "NRORG": NR_ORG,
-        "CDOPERADOR": CD_OPERADOR
+        "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
     }
-    
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "OAuth-Token": TOKEN_FIXO,
-        "OAuth-Cdoperador": CD_OPERADOR,
-        "OAuth-Nrorg": NR_ORG
+        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
+        "User-Agent": "Mozilla/5.0"
     }
     
     try:
@@ -68,268 +153,184 @@ def fetch_lista_funcionarios_ativos(data_ref):
             data = r.json()
             if "dataset" in data and "data" in data["dataset"]:
                 df = pd.DataFrame(data["dataset"]["data"])
+                # Filtra apenas Atividade Normal para não buscar demitidos
                 if not df.empty and 'NMSITUFUNCH' in df.columns:
-                    # Filtra apenas Atividade Normal
                     df = df[df['NMSITUFUNCH'].str.strip() == 'Atividade Normal']
-                    if not df.empty:
-                        return df[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(columns={
-                            'NRVINCULOM': 'ID',
-                            'NMVINCULOM': 'Funcionario',
-                            'NMESTRUTGEREN': 'Escola'
-                        })
+                return df
     except Exception as e:
-        st.error(f"Erro Lista: {e}")
+        st.error(f"Erro Portal Gestor: {e}")
     return pd.DataFrame()
 
-def fetch_detalhe_ponto(id_funcionario, nr_periodo):
-    url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
-    params = {
-        "requestType": "FilterData",
-        "NRVINCULOM": str(id_funcionario),
-        "NRPERIODOAPURACAO": str(nr_periodo),
-        "NRORG": NR_ORG,
-        "CDOPERADOR": CD_OPERADOR
-    }
+# ==============================================================================
+# 5. API HCM (Buscar Ocorrências)
+# ==============================================================================
+def fetch_ocorrencias_hcm(token, lista_ids, periodo_apuracao, mes_competencia):
+    """
+    Busca ocorrências (Falta/Atraso) no HCM enviando lista de IDs.
+    """
+    url = "https://hcm.teknisa.com/backend/index.php/getMarcacaoPontoOcorrencias"
+    
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json",
-        "OAuth-Token": TOKEN_FIXO,
-        "OAuth-Cdoperador": CD_OPERADOR,
-        "OAuth-Nrorg": NR_ORG
+        "Content-Type": "application/json",
+        "OAuth-Token": token,
+        "OAuth-Hash": HCM_HASH,
+        "OAuth-Project": HCM_PROJECT,
+        "User-Id": HCM_UID_BROWSER,
+        "OAuth-KeepConnected": "Yes"
     }
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            if "dataset" in data and "data" in data["dataset"]:
-                return data["dataset"]["data"]
-    except:
-        pass
-    return []
-
-# ==============================================================================
-# 5. LÓGICA CENTRAL (PROCESSAMENTO INTELIGENTE)
-# ==============================================================================
-
-def analisar_funcionario(row, nr_periodo):
-    id_func = row['ID']
-    nome_func = row['Funcionario']
-    escola = row['Escola']
     
-    dias = fetch_detalhe_ponto(id_func, nr_periodo)
+    # Divide a lista em lotes de 100 para não estourar a request
+    chunk_size = 100
+    all_ocorrencias = []
     
-    if not dias:
-        return {
-            "ID": int(id_func), "Funcionario": nome_func, "Escola": escola,
-            "Total_Dias": 0, "Nao_Apurado": 0, "Faltas": 0, 
-            "Atraso_Horas": 0.0, "Status": "Sem Dados", "Algum_Trabalho": False
+    total_chunks = len(lista_ids) // chunk_size + 1
+    prog_bar = st.progress(0, text="Consultando HCM...")
+
+    for i in range(0, len(lista_ids), chunk_size):
+        chunk = lista_ids[i:i + chunk_size]
+        prog_bar.progress((i / len(lista_ids)), text=f"Consultando lote {i} a {i+len(chunk)}...")
+        
+        payload = {
+            "disableLoader": False,
+            "filter": [
+                {"name": "P_NRORG", "operator": "=", "value": "3260"},
+                {"name": "P_NRORG_PADRAO", "operator": "=", "value": "0"},
+                {"name": "P_DTMESCOMPETENC", "operator": "=", "value": mes_competencia}, # Ex: "01/01/2026"
+                {"name": "NRPERIODOAPURACAO", "value": int(periodo_apuracao), "operator": "=", "isCustomFilter": True},
+                
+                # AQUI ENTRA A LISTA DE IDs DO PORTAL GESTOR
+                {"name": "NRVINCULOM_LIST", "value": chunk, "operator": "IN", "isCustomFilter": True},
+                
+                {"name": "P_TIPOOCORRENCIA", "value": ["ATRASO", "FALTA"], "operator": "IN", "isCustomFilter": True}
+            ],
+            "page": 1, "itemsPerPage": 9999, "requestType": "FilterData"
         }
         
-    total_dias = len(dias)
-    qtd_nao_apurado = 0
-    qtd_faltas = 0
-    atraso_acumulado_decimal = 0.0
-    
-    # Flag para saber se a pessoa trabalhou PELO MENOS UM DIA no período
-    teve_algum_trabalho = False 
-    
-    for dia in dias:
-        # Verifica se teve algum sinal de vida (Entrada ou Horas Trabalhadas > 0)
-        entrada = dia.get("ENTRADA")
-        trabalhado = dia.get("TRABALH")
-        
-        if (entrada is not None and entrada != ""):
-            teve_algum_trabalho = True
-        elif (trabalhado is not None and trabalhado != "0" and trabalhado != "00:00"):
-            teve_algum_trabalho = True
+        try:
+            r = requests.post(url, headers=headers, json=payload, timeout=45)
+            if r.status_code == 200:
+                data = r.json()
+                if "dataset" in data and "getMarcacaoPontoOcorrencias" in data["dataset"]:
+                    all_ocorrencias.extend(data["dataset"]["getMarcacaoPontoOcorrencias"])
+        except Exception as e:
+            st.warning(f"Erro no lote {i}: {e}")
+            
+    prog_bar.empty()
+    return pd.DataFrame(all_ocorrencias)
 
-        # 1. Contagem de Não Apurados
-        if dia.get("ID_DIAAPURADO") == "N":
-            qtd_nao_apurado += 1
-            
-        # 2. Contagem de Faltas (Lançadas no sistema)
-        fl_dias = dia.get("FL_DIAS")
-        if fl_dias is not None and str(fl_dias).strip() != "":
-            qtd_faltas += 1
-            
-        # 3. Atrasos
-        bh_desc = dia.get("BH_DESC_DIA")
-        if bh_desc:
-            try:
-                val_str = str(bh_desc).replace(',', '.')
-                valor = float(val_str)
-                if valor < 0:
-                    atraso_acumulado_decimal += abs(valor)
-            except:
-                pass
-
-    # --- HIERARQUIA DE STATUS ---
-    
-    status = "✅ Regular"
-    
-    # REGRA PRIORITÁRIA: PONTO EM BRANCO
-    # Se não trabalhou nenhum dia E tem dias no período
-    if not teve_algum_trabalho and total_dias > 0:
-        status = "⚪ PONTO TOTALMENTE EM BRANCO"
-        # Opcional: Zerar contadores de falta para não poluir o outro gráfico, 
-        # já que aqui o problema é macro (cadastro/abandono) e não dia-a-dia.
-        # Mas mantivemos a contagem para referência.
-        
-    elif qtd_nao_apurado > 0:
-        if qtd_nao_apurado == total_dias:
-            status = "🚨 PENDENTE TOTAL (Nada Apurado)"
-        else:
-            status = "⚠️ Pendente Parcial"
-            
-    elif qtd_faltas > 0:
-        if (qtd_faltas / total_dias) > 0.5:
-            status = "🔥 Absenteísmo Crítico (>50%)"
-        else:
-            status = "❌ Com Faltas Pontuais"
-            
-    elif atraso_acumulado_decimal > 0:
-        status = "📉 Com Atrasos"
-
-    return {
-        "ID": int(id_func),
-        "Funcionario": nome_func,
-        "Escola": escola,
-        "Total_Dias": total_dias,
-        "Nao_Apurado": qtd_nao_apurado,
-        "Faltas": qtd_faltas,
-        "Atraso_Horas": atraso_acumulado_decimal,
-        "Status": status
-    }
+def decimal_para_hora(val):
+    """Converte 2.5 para 02:30"""
+    try:
+        horas = int(val)
+        minutos = int((val - horas) * 60)
+        return f"{horas:02d}:{minutos:02d}"
+    except: return "00:00"
 
 # ==============================================================================
-# 6. INTERFACE
+# 6. INTERFACE PRINCIPAL
 # ==============================================================================
 
-st.title("🕵️‍♂️ Auditoria Avançada de Ponto")
-st.markdown("""
-Esta ferramenta diagnostica a saúde do ponto eletrônico com a seguinte prioridade:
-1. **⚪ Ponto Totalmente em Branco**: Colaborador **sem nenhuma marcação** no período todo (Possível demissão não processada, licença ou abandono).
-2. **🚨 Não Apurado**: Dias que o sistema ainda não processou.
-3. **🔥 Absenteísmo Crítico**: Mais de 50% de faltas, mas com alguma presença.
-4. **❌ Faltas e 📉 Atrasos**: Ocorrências pontuais.
-""")
+st.title("🚨 Relatório de Faltas e Atrasos (HCM)")
+st.markdown("Cruzamento de dados: **Lista de Ativos (Portal Gestor)** x **Ocorrências (HCM)**")
 
 with st.sidebar:
-    st.header("Parâmetros")
-    data_ref = st.date_input("Data Base (Ativos)", datetime.now())
-    nr_periodo = st.text_input("Cód. Período", value="1904")
+    st.header("Filtros")
+    data_ref = st.date_input("Data Ref. (Ativos)", datetime.now())
+    
+    # Filtros do Payload HCM
+    comp_default = datetime.now().replace(day=1).strftime("%d/%m/%Y")
+    mes_competencia = st.text_input("Mês Competência (HCM)", value=comp_default, help="Sempre o dia 01 do mês. Ex: 01/01/2026")
+    periodo_apuracao = st.text_input("Período Apuração (Cód)", value="1904", help="Código interno do período (Ex: 1904)")
+    
     st.divider()
-    btn_run = st.button("🚀 Processar Diagnóstico", type="primary", use_container_width=True)
+    btn_buscar = st.button("🚀 Gerar Relatório", type="primary", use_container_width=True)
 
-if btn_run:
-    if not nr_periodo:
-        st.error("Informe o Código do Período.")
-        st.stop()
-        
-    with st.status("🔄 Executando varredura inteligente...", expanded=True) as status:
-        status.write("Obtendo funcionários em Atividade Normal...")
-        df_funcionarios = fetch_lista_funcionarios_ativos(data_ref)
+if btn_buscar:
+    # 1. BUSCA IDs NO PORTAL GESTOR
+    with st.status("🔄 Passo 1: Obtendo lista de funcionários ativos...", expanded=True) as status:
+        df_funcionarios = fetch_ids_portal_gestor(data_ref)
         
         if df_funcionarios.empty:
-            status.update(label="❌ Ninguém encontrado.", state="error")
+            status.update(label="❌ Nenhum funcionário encontrado no Portal Gestor.", state="error")
             st.stop()
             
-        total = len(df_funcionarios)
-        status.write(f"✅ {total} colaboradores listados.")
-        status.write("🚀 Analisando cartões de ponto (25 conexões simultâneas)...")
+        # Pega a lista de IDs limpa (inteiros)
+        lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
+        # Cria dicionário para mapear nomes depois (caso o HCM não traga o nome atualizado)
+        mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'].astype(str), df_funcionarios['NMVINCULOM']))
+        mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'].astype(str), df_funcionarios['NMESTRUTGEREN']))
         
-        resultados = []
-        pbar = st.progress(0)
+        status.write(f"✅ Encontrados **{len(lista_ids)}** funcionários ativos.")
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
-            futures = {executor.submit(analisar_funcionario, row, nr_periodo): row for _, row in df_funcionarios.iterrows()}
-            done = 0
-            for future in concurrent.futures.as_completed(futures):
-                res = future.result()
-                resultados.append(res)
-                done += 1
-                pbar.progress(done / total)
+        # 2. AUTENTICAÇÃO HCM
+        status.write("🔐 Passo 2: Autenticando no HCM...")
+        token_hcm = obter_sessao_hcm()
+        if not token_hcm:
+            status.update(label="❌ Falha ao logar no HCM.", state="error")
+            st.stop()
+            
+        # 3. BUSCA OCORRÊNCIAS NO HCM
+        status.write("📡 Passo 3: Consultando ocorrências em lote no HCM...")
+        df_ocorrencias = fetch_ocorrencias_hcm(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
         
-        status.update(label="Diagnóstico Concluído!", state="complete", expanded=False)
+        status.update(label="Processamento concluído!", state="complete", expanded=False)
 
-    # TRATAMENTO
-    df = pd.DataFrame(resultados)
-    df['Tempo Atraso'] = df['Atraso_Horas'].apply(decimal_para_hora_str)
-    
-    # --- MÉTRICAS ---
-    total_funcs = len(df)
-    
-    # 1. Grupo Crítico: Ponto em Branco
-    df_branco = df[df['Status'] == "⚪ PONTO TOTALMENTE EM BRANCO"]
-    count_branco = len(df_branco)
-    
-    # 2. Grupo: Apurados 100% OK (Sem pendencia, sem branco, sem falta, sem atraso)
-    df_ok = df[df['Status'] == "✅ Regular"]
-    count_ok = len(df_ok)
-    
-    # 3. Grupo: Faltas (Excluindo os "Em branco")
-    # Pega quem tem falta > 0 MAS NÃO está no status de "Em branco"
-    total_faltas_reais = df[df['Status'] != "⚪ PONTO TOTALMENTE EM BRANCO"]['Faltas'].sum()
-
-    st.markdown("### 📊 Resultado da Auditoria")
-    
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Total Analisado", total_funcs)
-    k2.metric("Ponto em Branco (Crítico)", count_branco, delta_color="inverse", help="Funcionários sem NENHUM registro no período inteiro.")
-    k3.metric("Faltas Totais (Reais)", int(total_faltas_reais), help="Soma das faltas de quem está trabalhando.")
-    k4.metric("Atrasos (Horas)", f"{df['Atraso_Horas'].sum():.1f}h")
-    
-    st.divider()
-    
-    # ABAS
-    tab_branco, tab_faltas, tab_pend, tab_atraso, tab_geral = st.tabs([
-        "⚪ Totalmente em Branco", 
-        "❌ Ranking Faltas", 
-        "🚨 Pendências Apuração",
-        "📉 Ranking Atrasos",
-        "📋 Visão Geral"
-    ])
-    
-    with tab_branco:
-        st.subheader(f"Funcionários sem registro algum no período ({count_branco})")
-        st.warning("⚠️ Estes colaboradores constam como 'Ativos', mas não têm nenhuma entrada ou hora trabalhada no período. Verifique se são desligamentos não processados ou licenças.")
-        st.dataframe(
-            df_branco[['ID', 'Funcionario', 'Escola', 'Total_Dias']],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with tab_faltas:
-        st.subheader("Quem está trabalhando mas possui Faltas")
-        # Filtra fora os brancos para não poluir
-        df_f = df[(df['Faltas'] > 0) & (df['Status'] != "⚪ PONTO TOTALMENTE EM BRANCO")].sort_values(by='Faltas', ascending=False)
-        st.dataframe(
-            df_f[['ID', 'Funcionario', 'Escola', 'Faltas', 'Status']],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with tab_pend:
-        st.subheader("Pendências de Apuração (Sistema)")
-        df_pend = df[df['Nao_Apurado'] > 0].sort_values(by='Nao_Apurado', ascending=False)
-        st.dataframe(
-            df_pend[['ID', 'Funcionario', 'Escola', 'Nao_Apurado', 'Status']],
-            use_container_width=True,
-            hide_index=True,
-            column_config={"Nao_Apurado": st.column_config.ProgressColumn("Dias Pendentes", format="%d", min_value=0, max_value=30)}
-        )
+    # 4. PROCESSAMENTO DOS DADOS
+    if df_ocorrencias.empty:
+        st.info("Nenhuma ocorrência (Falta ou Atraso) encontrada para este período e lista de funcionários.")
+    else:
+        # Convertendo valores
+        df_ocorrencias['DIFF_HOURS'] = pd.to_numeric(df_ocorrencias['DIFF_HOURS'], errors='coerce').fillna(0)
+        df_ocorrencias['NRVINCULOM'] = df_ocorrencias['NRVINCULOM'].astype(str)
         
-    with tab_atraso:
-        st.subheader("Acúmulo de Atrasos (Horas)")
-        df_atrasos = df[df['Atraso_Horas'] > 0].sort_values(by='Atraso_Horas', ascending=False)
-        st.dataframe(
-            df_atrasos[['ID', 'Funcionario', 'Escola', 'Tempo Atraso', 'Faltas']],
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with tab_geral:
-        st.subheader("Base Completa")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        csv = df.to_csv(index=False, sep=';', encoding='utf-8-sig')
-        st.download_button("📥 Baixar CSV Completo", csv, "auditoria_ponto_completa.csv", "text/csv")
+        # Mapeia escola atual do Portal Gestor (garante dado mais recente)
+        df_ocorrencias['Escola_Atual'] = df_ocorrencias['NRVINCULOM'].map(mapa_escolas)
+        
+        # --- AGRUPAMENTO ---
+        # Agrupa por ID para somar/contar
+        resumo = df_ocorrencias.groupby(['NRVINCULOM', 'NMVINCULOM', 'Escola_Atual']).agg(
+            Qtd_Faltas=('TIPO_OCORRENCIA', lambda x: (x == 'FALTA').sum()),
+            Total_Horas_Atraso=('DIFF_HOURS', lambda x: x[df_ocorrencias.loc[x.index, 'TIPO_OCORRENCIA'] == 'ATRASO'].sum()),
+            Dias_Ocorrencia=('DATA_INICIO', lambda x: ", ".join(x.unique()))
+        ).reset_index()
+        
+        # Filtra apenas quem tem problema
+        resumo = resumo[ (resumo['Qtd_Faltas'] > 0) | (resumo['Total_Horas_Atraso'] > 0) ]
+        
+        # Formata horas
+        resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
+        
+        # Ordenação
+        resumo = resumo.sort_values(by=['Qtd_Faltas', 'Total_Horas_Atraso'], ascending=False)
+        
+        # --- DASHBOARD ---
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Funcionários c/ Ocorrência", len(resumo))
+        k2.metric("Total Faltas", resumo['Qtd_Faltas'].sum())
+        k3.metric("Total Horas Atraso", f"{resumo['Total_Horas_Atraso'].sum():.1f}h")
+        
+        st.divider()
+        
+        tab1, tab2 = st.tabs(["📋 Resumo Gerencial", "🔍 Detalhe (Log Bruto)"])
+        
+        with tab1:
+            st.dataframe(
+                resumo[['NRVINCULOM', 'NMVINCULOM', 'Escola_Atual', 'Qtd_Faltas', 'Tempo_Atraso_Fmt']],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "NRVINCULOM": "Matrícula",
+                    "NMVINCULOM": "Funcionário",
+                    "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
+                    "Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Atraso", help="Soma total das horas de atraso")
+                }
+            )
+            
+            # Download CSV Resumido
+            csv_resumo = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
+            st.download_button("📥 Baixar Resumo (CSV)", csv_resumo, "hcm_resumo_ocorrencias.csv", "text/csv")
+            
+        with tab2:
+            st.write("Dados brutos retornados pelo HCM:")
+            st.dataframe(df_ocorrencias, use_container_width=True)
