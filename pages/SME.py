@@ -41,8 +41,8 @@ def get_base_url():
 
 BASE_URL_API = get_base_url()
 URL_AUTH = f"{BASE_URL_API}/auth"
-URL_TABELA = f"{BASE_URL_API}/ocorrencia/tabela"       # Fonte do Status/JSON
-URL_EXPORT = f"{BASE_URL_API}/ocorrencia/exportar"     # Fonte do Texto/CSV
+URL_TABELA = f"{BASE_URL_API}/ocorrencia/tabela"       
+URL_EXPORT = f"{BASE_URL_API}/ocorrencia/exportar"     
 URL_MSG_BASE = f"{BASE_URL_API}/ocorrencia/ocorrencia-mensagem/buscar-por-ocorrencia"
 URL_ENVIAR_MSG = f"{BASE_URL_API}/ocorrencia/ocorrencia-mensagem/"
 
@@ -60,7 +60,42 @@ HEADERS_CHROME = {
 }
 
 # ==============================================================================
-# 4. FUNÇÕES DE AUTENTICAÇÃO E ENVIO
+# 4. FUNÇÕES DE LÓGICA DE NEGÓCIO (GLOBAIS)
+# ==============================================================================
+# Movemos para cá para poder reutilizar no "Auto-Patch" caso o session_state esteja velho
+
+def definir_status_resposta(row):
+    if 'ocorrenciaRespondida' in row.index:
+        val = str(row['ocorrenciaRespondida']).lower()
+        if val == 'true': return '✅ Respondido'
+        if val == 'false': return '🚨 Sem Resposta'
+    if str(row.get('flagEncerrado')).lower() == 'true': return '✅ Respondido'
+    return '🚨 Sem Resposta'
+
+def definir_solucao(row):
+    # Normaliza boleanos
+    encerrado = str(row.get('flagEncerrado', 'false')).lower() == 'true'
+    auto_encerrado = str(row.get('flagEncerramentoAutomatico', 'false')).lower() == 'true'
+    gerar_desconto = str(row.get('flagGerarDesconto', 'false')).lower() == 'true'
+    
+    # Se NÃO está encerrado (nem manual, nem auto) -> Aguardando
+    if not encerrado and not auto_encerrado:
+        return '⏳ Aguardando Parecer'
+        
+    # Se está encerrado, verifica se tem desconto (glosa)
+    if gerar_desconto:
+        return '💰 Gerou Glosa' # Encerrado, mas com falha
+    else:
+        return '🌟 Solucionado' # Encerrado com sucesso
+
+def cat_visual(val):
+    v = str(val).lower()
+    if 'insumo' in v or 'material' in v: return '🛠️ Insumos'
+    if 'equipe' in v or 'falta' in v or 'rh' in v: return '👥 Equipe'
+    return '📝 Outros'
+
+# ==============================================================================
+# 5. FUNÇÕES DE AUTENTICAÇÃO E ENVIO
 # ==============================================================================
 def carregar_logo():
     try: return Image.open("logo.png")
@@ -97,7 +132,6 @@ def get_header_request():
     return None
 
 def enviar_resposta_api(id_oc, mensagem):
-    """Envia a mensagem via POST para a API"""
     h = get_header_request()
     if not h: return False, "Falha na autenticação"
     
@@ -117,7 +151,7 @@ def enviar_resposta_api(id_oc, mensagem):
         return False, str(e)
 
 # ==============================================================================
-# 5. FETCHERS (JSON + CSV)
+# 6. FETCHERS (JSON + CSV)
 # ==============================================================================
 def fetch_json_paginado(data_inicio, data_fim, headers):
     dt_ini = data_inicio.strftime("%Y-%m-%dT00:00:00.000Z")
@@ -152,7 +186,6 @@ def fetch_json_paginado(data_inicio, data_fim, headers):
             
     if todos_registros:
         df = pd.json_normalize(todos_registros)
-        # === AQUI ADICIONAMOS AS NOVAS FLAGS NO MAPA DE RENOMEAÇÃO ===
         rename_map = {
             'id': 'id', 
             'data': 'dataHoraOcorrencia', 
@@ -161,8 +194,8 @@ def fetch_json_paginado(data_inicio, data_fim, headers):
             'observacaoFinal': 'observacao_json', 
             'ocorrenciaRespondida': 'ocorrenciaRespondida', 
             'flagEncerrado': 'flagEncerrado',
-            'flagGerarDesconto': 'flagGerarDesconto',             # Flag de Glosa
-            'flagEncerramentoAutomatico': 'flagEncerramentoAutomatico' # Flag Auto
+            'flagGerarDesconto': 'flagGerarDesconto',
+            'flagEncerramentoAutomatico': 'flagEncerramentoAutomatico'
         }
         df = df.rename(columns=rename_map)
         
@@ -201,14 +234,11 @@ def fetch_dados_mesclados(d_ini, d_fim):
     headers = get_header_request()
     if not headers: return None
 
-    # 1. Busca JSON
     df_json = fetch_json_paginado(d_ini, d_fim, headers)
     if df_json.empty: return None
 
-    # 2. Busca CSV
     df_csv = fetch_csv_export(d_ini, d_fim, headers)
 
-    # 3. Mesclagem
     if not df_csv.empty:
         df_final = pd.merge(df_json, df_csv, on='id', how='left', suffixes=('', '_csv'))
         if 'observacao' in df_final.columns:
@@ -224,46 +254,15 @@ def fetch_dados_mesclados(d_ini, d_fim):
         if 'observacao_json' in df_final.columns:
             df_final['observacao'] = df_final['observacao_json']
             
-    # 4. Processamento de Datas
     if 'dataHoraOcorrencia' in df_final.columns:
         df_final['dataHoraOcorrencia'] = pd.to_datetime(df_final['dataHoraOcorrencia'], errors='coerce')
         df_final['Data'] = df_final['dataHoraOcorrencia'].dt.date
     
-    # 5. Status de Resposta (Chat)
-    def definir_status_resposta(row):
-        if 'ocorrenciaRespondida' in row.index:
-            val = str(row['ocorrenciaRespondida']).lower()
-            if val == 'true': return '✅ Respondido'
-            if val == 'false': return '🚨 Sem Resposta'
-        if str(row.get('flagEncerrado')).lower() == 'true': return '✅ Respondido'
-        return '🚨 Sem Resposta'
-
-    # 6. Status de Solução (Glosa/Sucesso/Pendente)
-    def definir_solucao(row):
-        # Normaliza boleanos
-        encerrado = str(row.get('flagEncerrado', 'false')).lower() == 'true'
-        auto_encerrado = str(row.get('flagEncerramentoAutomatico', 'false')).lower() == 'true'
-        gerar_desconto = str(row.get('flagGerarDesconto', 'false')).lower() == 'true'
-        
-        # Se NÃO está encerrado (nem manual, nem auto) -> Aguardando
-        if not encerrado and not auto_encerrado:
-            return '⏳ Aguardando Parecer'
-            
-        # Se está encerrado, verifica se tem desconto (glosa)
-        if gerar_desconto:
-            return '💰 Gerou Glosa' # Encerrado, mas com falha
-        else:
-            return '🌟 Solucionado' # Encerrado com sucesso
-
+    # Aplica funções globais
     df_final['Status_Resposta'] = df_final.apply(definir_status_resposta, axis=1)
     df_final['Status_Solucao'] = df_final.apply(definir_solucao, axis=1)
 
     if 'Categoria' not in df_final.columns: df_final['Categoria'] = 'Geral'
-    def cat_visual(val):
-        v = str(val).lower()
-        if 'insumo' in v or 'material' in v: return '🛠️ Insumos'
-        if 'equipe' in v or 'falta' in v or 'rh' in v: return '👥 Equipe'
-        return '📝 Outros'
     df_final['Categoria_Visual'] = df_final['Categoria'].apply(cat_visual)
     
     return df_final
@@ -283,7 +282,7 @@ def fetch_mensagens(id_oc):
     except: return []
 
 # ==============================================================================
-# UI COMPONENTS (POPUP & PLOTS)
+# UI COMPONENTS
 # ==============================================================================
 @st.dialog("Histórico da Ocorrência", width="large")
 def exibir_modal_chat(titulo, msgs):
@@ -329,7 +328,6 @@ hoje = datetime.now()
 d_ini = st.sidebar.date_input("Início", hoje)
 d_fim = st.sidebar.date_input("Fim", hoje)
 
-# Filtro por Escola
 df_raw = st.session_state['ocorrencias_df']
 lista_escolas = []
 if df_raw is not None and not df_raw.empty:
@@ -346,6 +344,16 @@ if st.sidebar.button("🔄 Buscar Ocorrências", use_container_width=True):
 st.title("🔔 Monitoramento de Ocorrências")
 df = st.session_state['ocorrencias_df']
 
+# --------------------------------------------------------------------------
+# FIX PARA O ERRO KEYERROR:
+# Se o DF existe na memória (cache), mas a coluna nova não, cria ela agora.
+# --------------------------------------------------------------------------
+if df is not None and not df.empty:
+    if 'Status_Solucao' not in df.columns:
+        st.toast("Atualizando estrutura de dados...", icon="🔧")
+        df['Status_Solucao'] = df.apply(definir_solucao, axis=1)
+        st.session_state['ocorrencias_df'] = df # Atualiza o cache
+
 if df is not None and not df.empty:
     # Filtro de Data
     if 'Data' in df.columns:
@@ -359,14 +367,11 @@ if df is not None and not df.empty:
 
     st.caption(f"Período: **{d_ini.strftime('%d/%m')}** a **{d_fim.strftime('%d/%m')}** | Total: {len(df_v)}")
     
-    # ----------------------------------------------------------------------
-    # KPI SECTION (ATUALIZADO COM ÍNDICE DE SOLUÇÃO)
-    # ----------------------------------------------------------------------
+    # KPIs
     qtd_solucionado = len(df_v[df_v['Status_Solucao'] == '🌟 Solucionado'])
     qtd_glosa = len(df_v[df_v['Status_Solucao'] == '💰 Gerou Glosa'])
     qtd_aguardando = len(df_v[df_v['Status_Solucao'] == '⏳ Aguardando Parecer'])
     
-    # Universo válido para o índice = Solucionados + Glosas (exclui o que ainda está em aberto)
     total_encerrados = qtd_solucionado + qtd_glosa
     if total_encerrados > 0:
         indice_solucao = (qtd_solucionado / total_encerrados) * 100
@@ -375,7 +380,7 @@ if df is not None and not df.empty:
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total", len(df_v))
-    k2.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Calculado sobre chamados encerrados (Manualmente ou Automaticamente).")
+    k2.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Calculado sobre chamados encerrados.")
     k3.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
     k4.metric("⏳ Aguardando", qtd_aguardando)
     st.divider()
@@ -397,26 +402,20 @@ if df is not None and not df.empty:
     # Abas
     tab_eq, tab_in, tab_out = st.tabs(["👥 Equipe/RH", "🛠️ Insumos", "📝 Outros"])
     
-    # ---------------- FUNÇÃO PARA RENDERIZAR ABA ----------------
     def render_aba(df_filtrado, titulo_grafico, cor_grafico, chave_btn):
         st.subheader(titulo_grafico)
         if not df_filtrado.empty:
             st.altair_chart(plot_top10(df_filtrado, cor_grafico), use_container_width=True)
             st.markdown(f"**Detalhamento ({len(df_filtrado)})**")
             
-            # Prepara DF
             cols_orig = ['id', 'Data', 'Status_Resposta', 'Status_Solucao', 'ueNome', 'observacao']
             cols_ok = [c for c in cols_orig if c in df_filtrado.columns]
             
             df_show = df_filtrado[cols_ok].rename(columns={
-                'id': 'ID', 
-                'Status_Resposta': 'Resposta', 
-                'Status_Solucao': 'Solução',
-                'ueNome': 'Nome', 
-                'observacao': 'Observações'
+                'id': 'ID', 'Status_Resposta': 'Resposta', 'Status_Solucao': 'Solução',
+                'ueNome': 'Nome', 'observacao': 'Observações'
             })
             
-            # Tabela com seleção
             evt = st.dataframe(
                 df_show,
                 use_container_width=True, hide_index=True, 
@@ -432,7 +431,6 @@ if df is not None and not df.empty:
                 try: sel_indices = evt["selection"]["rows"]
                 except: pass
             
-            # === ÁREA DE AÇÃO (Chat / Resposta em Massa) ===
             if sel_indices:
                 selected_rows = df_show.iloc[sel_indices]
                 qtd_selecionada = len(selected_rows)
@@ -440,7 +438,6 @@ if df is not None and not df.empty:
 
                 st.write(f"🔵 **{qtd_selecionada} item(ns) selecionado(s)**")
 
-                # Se apenas 1 selecionado -> Opção de ver Chat
                 if qtd_selecionada == 1:
                     r = selected_rows.iloc[0]
                     curr_id = str(r['ID'])
@@ -450,7 +447,6 @@ if df is not None and not df.empty:
                              msgs = fetch_mensagens(curr_id)
                              exibir_modal_chat(f"📍 {curr_nome} (ID: {curr_id})", msgs)
                 
-                # Resposta em Massa
                 with st.expander("✉️ Enviar Resposta (Individual ou em Massa)", expanded=True):
                     with st.form(key=f"form_massa_{chave_btn}"):
                         st.write(f"Responder IDs: {', '.join(map(str, ids_selecionados[:5]))} {'...' if len(ids_selecionados) > 5 else ''}")
@@ -477,17 +473,14 @@ if df is not None and not df.empty:
         else:
             st.info("Nenhuma ocorrência nesta categoria.")
 
-    # 1. EQUIPE
     with tab_eq:
         df_rh = df_v[df_v['Categoria_Visual'].str.contains("Equipe")]
         render_aba(df_rh, "10 Escolas com mais ocorrências - Equipe", "#d32f2f", "rh")
 
-    # 2. INSUMOS
     with tab_in:
         df_ins = df_v[df_v['Categoria_Visual'].str.contains("Insumos")]
         render_aba(df_ins, "10 Escolas com mais ocorrências - Insumos", "#f57c00", "in")
 
-    # 3. OUTROS
     with tab_out:
         df_out = df_v[df_v['Categoria_Visual'].str.contains("Outros")]
         render_aba(df_out, "10 Escolas com mais ocorrências - Outros", "#607d8b", "out")
