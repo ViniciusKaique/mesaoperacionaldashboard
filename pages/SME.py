@@ -65,9 +65,9 @@ HEADERS_CHROME = {
 def definir_status_resposta(row):
     if 'ocorrenciaRespondida' in row.index:
         val = str(row['ocorrenciaRespondida']).lower()
-        if val == 'true': return '✅ Respondido'
+        if val == 'true': return '✅ Respondida' # Ajustado para feminino
         if val == 'false': return '🚨 Sem Resposta'
-    if str(row.get('flagEncerrado')).lower() == 'true': return '✅ Respondido'
+    if str(row.get('flagEncerrado')).lower() == 'true': return '✅ Respondida' # Ajustado para feminino
     return '🚨 Sem Resposta'
 
 def definir_solucao(row):
@@ -84,7 +84,7 @@ def definir_solucao(row):
     if gerar_desconto:
         return '💰 Gerou Glosa' 
     else:
-        return '🌟 Solucionado' 
+        return '🌟 Solucionada' # Ajustado para feminino
 
 def cat_visual(val):
     v = str(val).lower()
@@ -366,13 +366,13 @@ if df is not None and not df.empty:
     # BLOCO DE KPIs ATUALIZADO (2 NÍVEIS)
     # --------------------------------------------------------------------------
     
-    # 1. KPIs de Comunicação
+    # 1. KPIs de Comunicação (Filtros no Feminino)
     qtd_total = len(df_v)
-    qtd_respondidas = len(df_v[df_v['Status_Resposta'] == '✅ Respondido'])
+    qtd_respondidas = len(df_v[df_v['Status_Resposta'] == '✅ Respondida'])
     qtd_sem_resposta = len(df_v[df_v['Status_Resposta'] == '🚨 Sem Resposta'])
 
-    # 2. KPIs de Solução Financeira/Técnica
-    qtd_solucionado = len(df_v[df_v['Status_Solucao'] == '🌟 Solucionado'])
+    # 2. KPIs de Solução Financeira/Técnica (Filtros no Feminino)
+    qtd_solucionado = len(df_v[df_v['Status_Solucao'] == '🌟 Solucionada'])
     qtd_glosa = len(df_v[df_v['Status_Solucao'] == '💰 Gerou Glosa'])
     qtd_aguardando = len(df_v[df_v['Status_Solucao'] == '⏳ Aguardando Parecer'])
     
@@ -393,9 +393,9 @@ if df is not None and not df.empty:
 
     st.markdown("### Status de Solução")
     k4, k5, k6, k7 = st.columns(4)
-    k4.metric("🚨 Com Glosa", qtd_glosa, delta_color="inverse")
-    k5.metric("✅ Solucionado", qtd_solucionado)
-    k6.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Solucionado / (Solucionado + Glosa)")
+    k4.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
+    k5.metric("✅ Solucionadas", qtd_solucionado) # Label no Plural, concordando com Ocorrências
+    k6.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Solucionadas / (Solucionadas + Glosa)")
     k7.metric("⏳ Aguardando", qtd_aguardando)
     
     st.divider()
