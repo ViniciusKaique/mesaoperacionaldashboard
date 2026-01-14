@@ -1,6 +1,3 @@
-================================================
-FILE: pages/DIAGNOSTICO_PONTO.py
-================================================
 import streamlit as st
 import requests
 import pandas as pd
@@ -398,7 +395,6 @@ if btn_buscar:
         with tab3:
             st.subheader(f"✅ Ponto Excelente ({len(df_sem_ocorrencias)})")
             st.caption("Colaboradores ativos sem nenhuma falta ou atraso registrado no período (descontando hoje).")
-            # Ponto excelente não tem ocorrência, logo não precisa ver espelho com urgência (opcional)
             st.dataframe(df_sem_ocorrencias, use_container_width=True, hide_index=True)
             
         with tab4:
@@ -412,6 +408,5 @@ if btn_buscar:
                         "url_demonstrativo": st.column_config.LinkColumn("Ver Espelho", display_text="📄 Abrir", width="small")
                     }
                 )
-                # Exportação limpa (sem a URL)
                 csv = resumo.drop(columns=['url_demonstrativo'], errors='ignore').to_csv(index=False, sep=';', encoding='utf-8-sig')
                 st.download_button("📥 Baixar Planilha", csv, f"hcm_relatorio_{periodo_apuracao}.csv", "text/csv")
