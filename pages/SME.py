@@ -101,9 +101,7 @@ def enviar_resposta_api(id_oc, mensagem):
     h = get_header_request()
     if not h: return False, "Falha na autenticação"
     
-    # Header específico para envio de JSON
     h["Content-Type"] = "application/json;charset=UTF-8"
-    
     payload = {
         "idOcorrencia": str(id_oc),
         "mensagem": mensagem
@@ -154,10 +152,17 @@ def fetch_json_paginado(data_inicio, data_fim, headers):
             
     if todos_registros:
         df = pd.json_normalize(todos_registros)
+        # === AQUI ADICIONAMOS AS NOVAS FLAGS NO MAPA DE RENOMEAÇÃO ===
         rename_map = {
-            'id': 'id', 'data': 'dataHoraOcorrencia', 'unidadeEscolar.descricao': 'ueNome',
-            'tipo': 'Categoria', 'observacaoFinal': 'observacao_json', 
-            'ocorrenciaRespondida': 'ocorrenciaRespondida', 'flagEncerrado': 'flagEncerrado'
+            'id': 'id', 
+            'data': 'dataHoraOcorrencia', 
+            'unidadeEscolar.descricao': 'ueNome',
+            'tipo': 'Categoria', 
+            'observacaoFinal': 'observacao_json', 
+            'ocorrenciaRespondida': 'ocorrenciaRespondida', 
+            'flagEncerrado': 'flagEncerrado',
+            'flagGerarDesconto': 'flagGerarDesconto',             # Flag de Glosa
+            'flagEncerramentoAutomatico': 'flagEncerramentoAutomatico' # Flag Auto
         }
         df = df.rename(columns=rename_map)
         
@@ -219,12 +224,13 @@ def fetch_dados_mesclados(d_ini, d_fim):
         if 'observacao_json' in df_final.columns:
             df_final['observacao'] = df_final['observacao_json']
             
-    # 4. Processamento
+    # 4. Processamento de Datas
     if 'dataHoraOcorrencia' in df_final.columns:
         df_final['dataHoraOcorrencia'] = pd.to_datetime(df_final['dataHoraOcorrencia'], errors='coerce')
         df_final['Data'] = df_final['dataHoraOcorrencia'].dt.date
     
-    def definir_status(row):
+    # 5. Status de Resposta (Chat)
+    def definir_status_resposta(row):
         if 'ocorrenciaRespondida' in row.index:
             val = str(row['ocorrenciaRespondida']).lower()
             if val == 'true': return '✅ Respondido'
@@ -232,7 +238,25 @@ def fetch_dados_mesclados(d_ini, d_fim):
         if str(row.get('flagEncerrado')).lower() == 'true': return '✅ Respondido'
         return '🚨 Sem Resposta'
 
-    df_final['Status_Resposta'] = df_final.apply(definir_status, axis=1)
+    # 6. Status de Solução (Glosa/Sucesso/Pendente)
+    def definir_solucao(row):
+        # Normaliza boleanos
+        encerrado = str(row.get('flagEncerrado', 'false')).lower() == 'true'
+        auto_encerrado = str(row.get('flagEncerramentoAutomatico', 'false')).lower() == 'true'
+        gerar_desconto = str(row.get('flagGerarDesconto', 'false')).lower() == 'true'
+        
+        # Se NÃO está encerrado (nem manual, nem auto) -> Aguardando
+        if not encerrado and not auto_encerrado:
+            return '⏳ Aguardando Parecer'
+            
+        # Se está encerrado, verifica se tem desconto (glosa)
+        if gerar_desconto:
+            return '💰 Gerou Glosa' # Encerrado, mas com falha
+        else:
+            return '🌟 Solucionado' # Encerrado com sucesso
+
+    df_final['Status_Resposta'] = df_final.apply(definir_status_resposta, axis=1)
+    df_final['Status_Solucao'] = df_final.apply(definir_solucao, axis=1)
 
     if 'Categoria' not in df_final.columns: df_final['Categoria'] = 'Geral'
     def cat_visual(val):
@@ -259,7 +283,7 @@ def fetch_mensagens(id_oc):
     except: return []
 
 # ==============================================================================
-# UI COMPONENTS (POPUP)
+# UI COMPONENTS (POPUP & PLOTS)
 # ==============================================================================
 @st.dialog("Histórico da Ocorrência", width="large")
 def exibir_modal_chat(titulo, msgs):
@@ -305,7 +329,7 @@ hoje = datetime.now()
 d_ini = st.sidebar.date_input("Início", hoje)
 d_fim = st.sidebar.date_input("Fim", hoje)
 
-# === NOVO: Filtro por Escola ===
+# Filtro por Escola
 df_raw = st.session_state['ocorrencias_df']
 lista_escolas = []
 if df_raw is not None and not df_raw.empty:
@@ -329,17 +353,31 @@ if df is not None and not df.empty:
         df_v = df[mask].copy()
     else: df_v = df.copy()
 
-    # Aplica Filtro de Escola se houver seleção
+    # Aplica Filtro de Escola
     if filtro_escola:
         df_v = df_v[df_v['ueNome'].isin(filtro_escola)]
 
     st.caption(f"Período: **{d_ini.strftime('%d/%m')}** a **{d_fim.strftime('%d/%m')}** | Total: {len(df_v)}")
     
-    # KPIs
-    k1, k2, k3 = st.columns(3)
+    # ----------------------------------------------------------------------
+    # KPI SECTION (ATUALIZADO COM ÍNDICE DE SOLUÇÃO)
+    # ----------------------------------------------------------------------
+    qtd_solucionado = len(df_v[df_v['Status_Solucao'] == '🌟 Solucionado'])
+    qtd_glosa = len(df_v[df_v['Status_Solucao'] == '💰 Gerou Glosa'])
+    qtd_aguardando = len(df_v[df_v['Status_Solucao'] == '⏳ Aguardando Parecer'])
+    
+    # Universo válido para o índice = Solucionados + Glosas (exclui o que ainda está em aberto)
+    total_encerrados = qtd_solucionado + qtd_glosa
+    if total_encerrados > 0:
+        indice_solucao = (qtd_solucionado / total_encerrados) * 100
+    else:
+        indice_solucao = 0
+
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Total", len(df_v))
-    k2.metric("✅ Respondidas", len(df_v[df_v['Status_Resposta'] == '✅ Respondido']))
-    k3.metric("🚨 Sem Resposta", len(df_v[df_v['Status_Resposta'] == '🚨 Sem Resposta']))
+    k2.metric("Índice Solução", f"{indice_solucao:.1f}%", help="Calculado sobre chamados encerrados (Manualmente ou Automaticamente).")
+    k3.metric("💰 Com Glosa", qtd_glosa, delta_color="inverse")
+    k4.metric("⏳ Aguardando", qtd_aguardando)
     st.divider()
 
     # Gráficos Gerais
@@ -359,7 +397,7 @@ if df is not None and not df.empty:
     # Abas
     tab_eq, tab_in, tab_out = st.tabs(["👥 Equipe/RH", "🛠️ Insumos", "📝 Outros"])
     
-    # ---------------- FUNÇÃO PARA RENDERIZAR ABA COM MULTI-SELEÇÃO E RESPOSTA EM MASSA ----------------
+    # ---------------- FUNÇÃO PARA RENDERIZAR ABA ----------------
     def render_aba(df_filtrado, titulo_grafico, cor_grafico, chave_btn):
         st.subheader(titulo_grafico)
         if not df_filtrado.empty:
@@ -367,18 +405,22 @@ if df is not None and not df.empty:
             st.markdown(f"**Detalhamento ({len(df_filtrado)})**")
             
             # Prepara DF
-            cols_orig = ['id', 'Data', 'Status_Resposta', 'ueNome', 'observacao']
+            cols_orig = ['id', 'Data', 'Status_Resposta', 'Status_Solucao', 'ueNome', 'observacao']
             cols_ok = [c for c in cols_orig if c in df_filtrado.columns]
             
             df_show = df_filtrado[cols_ok].rename(columns={
-                'id': 'ID', 'Status_Resposta': 'Status', 'ueNome': 'Nome', 'observacao': 'Observações'
+                'id': 'ID', 
+                'Status_Resposta': 'Resposta', 
+                'Status_Solucao': 'Solução',
+                'ueNome': 'Nome', 
+                'observacao': 'Observações'
             })
             
-            # Tabela com seleção MÚLTIPLA
+            # Tabela com seleção
             evt = st.dataframe(
                 df_show,
                 use_container_width=True, hide_index=True, 
-                selection_mode="multi-row", # <--- MUDANÇA IMPORTANTE
+                selection_mode="multi-row",
                 on_select="rerun",
                 column_config={"Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY")},
                 key=f"data_table_{chave_btn}"
@@ -390,7 +432,7 @@ if df is not None and not df.empty:
                 try: sel_indices = evt["selection"]["rows"]
                 except: pass
             
-            # === ÁREA DE AÇÃO (Chat Individual ou Resposta em Massa) ===
+            # === ÁREA DE AÇÃO (Chat / Resposta em Massa) ===
             if sel_indices:
                 selected_rows = df_show.iloc[sel_indices]
                 qtd_selecionada = len(selected_rows)
@@ -408,11 +450,11 @@ if df is not None and not df.empty:
                              msgs = fetch_mensagens(curr_id)
                              exibir_modal_chat(f"📍 {curr_nome} (ID: {curr_id})", msgs)
                 
-                # Se 1 ou mais selecionados -> Opção de Responder em Massa
+                # Resposta em Massa
                 with st.expander("✉️ Enviar Resposta (Individual ou em Massa)", expanded=True):
                     with st.form(key=f"form_massa_{chave_btn}"):
-                        st.write(f"Você está prestes a responder para os IDs: {', '.join(map(str, ids_selecionados[:5]))} {'...' if len(ids_selecionados) > 5 else ''}")
-                        txt_resposta = st.text_area("Mensagem de Resposta:", height=150)
+                        st.write(f"Responder IDs: {', '.join(map(str, ids_selecionados[:5]))} {'...' if len(ids_selecionados) > 5 else ''}")
+                        txt_resposta = st.text_area("Mensagem:", height=150)
                         btn_enviar = st.form_submit_button(f"Enviar para {qtd_selecionada} ocorrência(s)")
                         
                         if btn_enviar and txt_resposta:
@@ -425,7 +467,7 @@ if df is not None and not df.empty:
                                 if ok: sucessos += 1
                                 else: erros += 1
                                 progress_bar.progress((idx + 1) / qtd_selecionada)
-                                time.sleep(0.1) # Pequeno delay para não sobrecarregar
+                                time.sleep(0.1) 
                             
                             progress_bar.empty()
                             if erros == 0:
