@@ -203,6 +203,7 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
 
 def decimal_para_hora(val):
     try:
+        if pd.isna(val) or val == 0: return "00:00"
         horas = int(val)
         minutos = int((val - horas) * 60)
         return f"{horas:02d}:{minutos:02d}"
@@ -223,7 +224,6 @@ with st.sidebar:
     competencia_sugerida = datetime.now().replace(day=1).strftime("%d/%m/%Y")
     
     if not df_periodos.empty:
-        # Usa apenas a descrição para o usuário selecionar
         opcao = st.selectbox("Selecione o Período:", df_periodos['DSPERIODOAPURACAO'])
         row_sel = df_periodos[df_periodos['DSPERIODOAPURACAO'] == opcao].iloc[0]
         periodo_apuracao = row_sel['NRPERIODOAPURACAO']
@@ -280,45 +280,47 @@ if btn_buscar:
         if qtd_antes > qtd_depois:
             st.toast(f"ℹ️ {qtd_antes - qtd_depois} ocorrências de hoje ({hoje_str}) foram ignoradas.")
     
-    # 2. SEPARAÇÃO E CÁLCULOS (CORREÇÃO AQUI)
+    # 2. SEPARAÇÃO E CÁLCULOS
     if ocorrencias_filtradas.empty:
         st.success("🎉 Nenhuma falta ou atraso encontrado (exceto hoje)!")
     else:
+        # Garante que DIFF_HOURS seja numérico
         ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
         ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
         
-        # Garante nomes atualizados do Portal
+        # Nomes e Escolas
         ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
         ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
         
         # ======================================================================
-        # NOVO MÉTODO DE AGREGAÇÃO (PARA CORRIGIR FALTAS DUPLICADAS NO MESMO DIA)
+        # CÁLCULOS SEPARADOS (CORREÇÃO DE SOMA)
         # ======================================================================
         
-        # 1. FALTAS: Remove duplicatas de DIA para o mesmo vínculo antes de contar
+        # A) FALTAS: Remove linhas duplicadas de dia para o mesmo vínculo para contar DIAS
         df_faltas_unique = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO'])
         s_faltas = df_faltas_unique.groupby('NRVINCULOM').size().rename('Qtd_Faltas')
         
-        # 2. ATRASOS: Mantém todas as linhas para somar as horas
+        # B) ATRASOS: Mantém TODAS as linhas e SOMA as horas
         df_atrasos_all = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO']
         s_atrasos = df_atrasos_all.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
         
-        # 3. LISTA DE DATAS (Junta datas de falta e atraso)
+        # C) DATAS: Lista todas as datas de problemas
         s_datas = ocorrencias_filtradas.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
         
-        # 4. BASE DE DADOS ÚNICA (Para fazer o merge)
-        df_base_agg = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates(subset=['NRVINCULOM']).set_index('NRVINCULOM')
+        # D) CONSOLIDAÇÃO: Pega lista única de pessoas com problema e junta os dados
+        # Cria um DF base apenas com os IDs que tiveram algum problema
+        df_base_agg = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
         
-        # 5. MERGE FINAL
-        resumo = df_base_agg.join(s_faltas).join(s_atrasos).join(s_datas).fillna(0).reset_index()
+        # Join (Left join na base de problemas)
+        resumo = df_base_agg.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
         
-        # Formatação
+        # Formatação Visual
         resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
 
         # 3. IDENTIFICAR "SEM OCORRÊNCIAS"
         ids_com_problema = set(resumo['NRVINCULOM'].unique())
-        # Filtra do DF original quem não está na lista de problemas
+        # Filtra do DF original (Portal Gestor) quem não está na lista de problemas
         df_sem_ocorrencias = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
         df_sem_ocorrencias = df_sem_ocorrencias[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']].rename(
             columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'}
@@ -337,9 +339,10 @@ if btn_buscar:
         
         with tab1:
             st.subheader("Quem mais faltou no período")
-            df_faltas = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+            # Filtra quem tem pelo menos 1 falta
+            df_faltas_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
             st.dataframe(
-                df_faltas[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
+                df_faltas_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
                 use_container_width=True,
                 hide_index=True,
                 column_config={"Qtd_Faltas": st.column_config.NumberColumn("Qtd. Dias Falta", format="%d ❌")}
@@ -347,9 +350,10 @@ if btn_buscar:
             
         with tab2:
             st.subheader("Quem tem mais horas de atraso")
-            df_atrasos = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+            # Filtra quem tem atraso (>0)
+            df_atrasos_show = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
             st.dataframe(
-                df_atrasos[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
+                df_atrasos_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
                 use_container_width=True,
                 hide_index=True,
                 column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
