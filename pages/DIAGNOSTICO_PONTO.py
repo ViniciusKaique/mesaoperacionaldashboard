@@ -1,3 +1,6 @@
+================================================
+FILE: pages/DIAGNOSTICO_PONTO.py
+================================================
 import streamlit as st
 import requests
 import pandas as pd
@@ -329,7 +332,7 @@ if btn_buscar:
             columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'}
         )
 
-        # --- EXIBIÇÃO ---
+        # --- EXIBIÇÃO DE KPIs ---
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Analisado", len(df_funcionarios))
         k2.metric("✅ Ponto Excelente", len(df_sem_ocorrencias), delta_color="normal")
@@ -337,36 +340,78 @@ if btn_buscar:
         k4.metric("Faltas Totais (Dias)", resumo['Qtd_Faltas'].sum())
         
         st.divider()
+
+        # ======================================================================
+        # NOVO: LINK PARA DEMONSTRATIVO (ESPELHO DE PONTO)
+        # ======================================================================
+        def criar_link_demonstrativo(row_id):
+            if not row_id: return None
+            # Remove .0 se vier como float
+            sid = str(row_id).replace('.0', '')
+            # Monta a URL usando as credenciais e o período selecionado
+            return (f"https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
+                    f"?requestType=FilterData"
+                    f"&NRVINCULOM={sid}"
+                    f"&NRPERIODOAPURACAO={periodo_apuracao}"
+                    f"&NRORG={PG_NR_ORG}"
+                    f"&CDOPERADOR={PG_CD_OPERADOR}")
+
+        # Aplica o link no dataframe principal (resumo)
+        if not resumo.empty:
+            resumo['url_demonstrativo'] = resumo['NRVINCULOM'].apply(criar_link_demonstrativo)
         
+        # --- EXIBIÇÃO DAS ABAS ---
         tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
         
         with tab1:
             st.subheader("Quem mais faltou no período")
-            df_faltas_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
-            st.dataframe(
-                df_faltas_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Qtd_Faltas": st.column_config.NumberColumn("Qtd. Dias Falta", format="%d ❌")}
-            )
+            if not resumo.empty:
+                df_faltas_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+                st.dataframe(
+                    df_faltas_show[['url_demonstrativo', 'NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "url_demonstrativo": st.column_config.LinkColumn("Ver Espelho", display_text="📄 Abrir", width="small"),
+                        "Qtd_Faltas": st.column_config.NumberColumn("Qtd. Dias Falta", format="%d ❌")
+                    }
+                )
+            else:
+                st.info("Sem faltas.")
             
         with tab2:
             st.subheader("Quem tem mais horas de atraso")
-            df_atrasos_show = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
-            st.dataframe(
-                df_atrasos_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
-                use_container_width=True,
-                hide_index=True,
-                column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
-            )
+            if not resumo.empty:
+                df_atrasos_show = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+                st.dataframe(
+                    df_atrasos_show[['url_demonstrativo', 'NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "url_demonstrativo": st.column_config.LinkColumn("Ver Espelho", display_text="📄 Abrir", width="small"),
+                        "Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")
+                    }
+                )
+            else:
+                st.info("Sem atrasos.")
             
         with tab3:
             st.subheader(f"✅ Ponto Excelente ({len(df_sem_ocorrencias)})")
             st.caption("Colaboradores ativos sem nenhuma falta ou atraso registrado no período (descontando hoje).")
+            # Ponto excelente não tem ocorrência, logo não precisa ver espelho com urgência (opcional)
             st.dataframe(df_sem_ocorrencias, use_container_width=True, hide_index=True)
             
         with tab4:
             st.subheader("Tabela Geral Consolidada")
-            st.dataframe(resumo, use_container_width=True, hide_index=True)
-            csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-            st.download_button("📥 Baixar Planilha", csv, f"hcm_relatorio_{periodo_apuracao}.csv", "text/csv")
+            if not resumo.empty:
+                st.dataframe(
+                    resumo[['url_demonstrativo', 'NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Tempo_Atraso_Fmt']], 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "url_demonstrativo": st.column_config.LinkColumn("Ver Espelho", display_text="📄 Abrir", width="small")
+                    }
+                )
+                # Exportação limpa (sem a URL)
+                csv = resumo.drop(columns=['url_demonstrativo'], errors='ignore').to_csv(index=False, sep=';', encoding='utf-8-sig')
+                st.download_button("📥 Baixar Planilha", csv, f"hcm_relatorio_{periodo_apuracao}.csv", "text/csv")
