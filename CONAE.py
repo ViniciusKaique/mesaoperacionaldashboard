@@ -275,7 +275,7 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                 use_container_width=True, hide_index=True,
                 column_config={
                     "Status_Icon": st.column_config.TextColumn("", width="small"),
-                    "BaseOriginal": st.column_config.TextColumn("Base (Origem)", width="medium")
+                    "BaseOriginal": st.column_config.TextColumn("Base", width="medium")
                 }
             )
 
