@@ -205,7 +205,7 @@ def decimal_para_hora(val):
     except: return "00:00"
 
 # ==============================================================================
-# 6. API HCM - DETALHES DO PONTO (ESPELHO) - CORRIGIDO
+# 6. API HCM - DETALHES DO PONTO (ESPELHO)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def fetch_dias_demonstrativo(vinculo, periodo):
@@ -232,20 +232,18 @@ def fetch_dias_demonstrativo(vinculo, periodo):
         r = requests.get(url, params=params, headers=headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
-            # Tenta encontrar a lista de dados em chaves comuns
             dataset = data.get("dataset", {})
             items = dataset.get("data") or dataset.get("getDiasDemonstrativo") or []
             
             if items:
                 df = pd.DataFrame(items)
-                # Padroniza nomes das colunas para MAIÚSCULO e remove espaços
                 df.columns = df.columns.str.upper().str.strip()
                 return df
     except: pass
     return pd.DataFrame()
 
 # ==============================================================================
-# 7. INTERFACE E MODAL (COM DEBUG)
+# 7. INTERFACE E MODAL
 # ==============================================================================
 
 @st.dialog("📅 Espelho de Ponto (Detalhado)", width="large")
@@ -257,16 +255,12 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
         df_espelho = fetch_dias_demonstrativo(vinculo, periodo)
     
     if not df_espelho.empty:
-        # Colunas prioritárias
         cols_preferidas = [
             'DTAPURACAO', 'DSPONTODIA', 
             'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2', 'ENTRADA_SAIDA_3', 
             'QTHORASREALIZADAS', 'QTHORASFALTAS'
         ]
-        # Filtra apenas as que existem no DataFrame
         cols_existentes = [c for c in cols_preferidas if c in df_espelho.columns]
-        
-        # Se nenhuma coluna preferida existir, mostra todas (fallback)
         cols_final = cols_existentes if cols_existentes else df_espelho.columns.tolist()
 
         st.dataframe(
@@ -282,12 +276,7 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
         )
     else:
         st.warning("📭 Nenhum dado encontrado para este período.")
-        st.info("💡 **Dica:** Verifique se as faltas listadas na tabela principal pertencem ao período selecionado no menu lateral (ex: faltas de Jan/10 podem pertencer ao período anterior se o atual começar dia 16).")
-        
-        # Área de Debug para ajudar a entender o erro
-        with st.expander("🛠️ Ver Resposta Bruta (Debug)"):
-            st.write("Se esta área está vazia, a API retornou lista vazia []")
-            st.write(df_espelho)
+        st.info("💡 **Dica:** Verifique se o período selecionado no menu lateral corresponde às datas das faltas.")
 
 # ==============================================================================
 # 8. LÓGICA PRINCIPAL DA PÁGINA
@@ -325,19 +314,17 @@ with st.sidebar:
     
     st.divider()
     
-    # Botão de Busca
     if st.button("🚀 Disparar Análise", use_container_width=True):
         st.session_state["busca_realizada"] = True
-        st.session_state["dados_cache"] = {} # Limpa cache anterior
+        st.session_state["dados_cache"] = {} 
         st.rerun()
 
 # --- EXECUÇÃO (SE ATIVA) ---
 if st.session_state["busca_realizada"]:
     
-    # Se cache vazio, busca dados
+    # 1. BUSCA DADOS (SE NECESSÁRIO)
     if not st.session_state["dados_cache"]:
         with st.status("🔄 Analisando...", expanded=True) as status:
-            # 1. LISTA DE ATIVOS
             status.write("Buscando funcionários ativos...")
             df_funcionarios = fetch_ids_portal_gestor(data_ref)
             if df_funcionarios.empty:
@@ -347,7 +334,6 @@ if st.session_state["busca_realizada"]:
                 
             lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
             
-            # 2. HCM
             status.write("Consultando ocorrências no HCM...")
             token_hcm = obter_sessao_hcm()
             if not token_hcm:
@@ -364,17 +350,16 @@ if st.session_state["busca_realizada"]:
             }
             status.update(label="Sucesso!", state="complete", expanded=False)
 
-    # Recupera do Cache
+    # 2. RECUPERA DO CACHE
     df_funcionarios = st.session_state["dados_cache"]["funcionarios"]
     df_ocorrencias = st.session_state["dados_cache"]["ocorrencias"]
     periodo_apuracao_cache = st.session_state["dados_cache"]["periodo_apuracao"]
 
-    # Cria mapas
     df_funcionarios['NRVINCULOM'] = df_funcionarios['NRVINCULOM'].astype(str)
     mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMVINCULOM']))
     mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMESTRUTGEREN']))
 
-    # --- PROCESSAMENTO ---
+    # 3. PROCESSAMENTO
     hoje_str = datetime.now().strftime('%Y-%m-%d')
     ocorrencias_filtradas = pd.DataFrame()
     
@@ -396,7 +381,6 @@ if st.session_state["busca_realizada"]:
         ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
         ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
         
-        # Separa Faltas e Atrasos
         df_only_faltas = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].copy()
         s_faltas = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
         
@@ -411,9 +395,9 @@ if st.session_state["busca_realizada"]:
         resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-        # KPIs
         ids_com_problema = set(resumo['NRVINCULOM'].unique())
-        df_sem = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)]
+        df_sem = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
+        df_sem = df_sem.rename(columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'})
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Analisado", len(df_funcionarios))
@@ -422,9 +406,12 @@ if st.session_state["busca_realizada"]:
         k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
         
         st.divider()
-        st.info("💡 **Dica:** Clique na linha da tabela para abrir o Espelho de Ponto detalhado.")
+        st.info("💡 **Dica:** Clique na linha das tabelas para abrir o Espelho de Ponto detalhado.")
 
         tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
+        
+        # Variável para controlar qual funcionário será aberto no modal (EVITA O ERRO DE MÚLTIPLOS DIALOGS)
+        func_para_abrir = None
         
         # --- TAB 1: FALTAS ---
         with tab1:
@@ -436,10 +423,9 @@ if st.session_state["busca_realizada"]:
                     selection_mode="single-row", on_select="rerun", key="grid_faltas",
                     column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias Falta", format="%d ❌")}
                 )
-                if len(event1.selection.rows) > 0:
+                if event1.selection.rows:
                     idx = event1.selection.rows[0]
-                    row_data = df_show.iloc[idx]
-                    mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao_cache)
+                    func_para_abrir = df_show.iloc[idx]
             else: st.info("Sem faltas.")
             
         # --- TAB 2: ATRASOS ---
@@ -452,15 +438,21 @@ if st.session_state["busca_realizada"]:
                     selection_mode="single-row", on_select="rerun", key="grid_atrasos",
                     column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
                 )
-                if len(event2.selection.rows) > 0:
+                if event2.selection.rows:
                     idx = event2.selection.rows[0]
-                    row_data = df_show2.iloc[idx]
-                    mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao_cache)
+                    func_para_abrir = df_show2.iloc[idx]
             else: st.info("Sem atrasos.")
 
-        # --- TAB 3: SEM OCORRÊNCIAS ---
+        # --- TAB 3: PONTO EXCELENTE (AGORA CLICÁVEL) ---
         with tab3:
-            st.dataframe(df_sem[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN']], use_container_width=True, hide_index=True)
+            event3 = st.dataframe(
+                df_sem[['NRVINCULOM', 'Funcionario', 'Escola']], 
+                use_container_width=True, hide_index=True,
+                selection_mode="single-row", on_select="rerun", key="grid_excelente"
+            )
+            if event3.selection.rows:
+                idx = event3.selection.rows[0]
+                func_para_abrir = df_sem.iloc[idx]
 
         # --- TAB 4: GERAL ---
         with tab4:
@@ -469,10 +461,17 @@ if st.session_state["busca_realizada"]:
                     resumo, use_container_width=True, hide_index=True,
                     selection_mode="single-row", on_select="rerun", key="grid_geral"
                 )
-                if len(event4.selection.rows) > 0:
+                if event4.selection.rows:
                     idx = event4.selection.rows[0]
-                    row_data = resumo.iloc[idx]
-                    mostrar_espelho_modal(row_data['Funcionario'], row_data['NRVINCULOM'], periodo_apuracao_cache)
+                    func_para_abrir = resumo.iloc[idx]
                 
                 csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
                 st.download_button("📥 Baixar CSV", csv, "relatorio.csv", "text/csv")
+
+        # --- CHAMADA CENTRALIZADA DO MODAL (EVITA ERRO DE MÚLTIPLOS OPENS) ---
+        if func_para_abrir is not None:
+            mostrar_espelho_modal(
+                func_para_abrir['Funcionario'], 
+                func_para_abrir['NRVINCULOM'], 
+                periodo_apuracao_cache
+            )
