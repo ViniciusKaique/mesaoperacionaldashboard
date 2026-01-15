@@ -61,7 +61,6 @@ def fetch_estruturas():
         if r.status_code == 200:
             data = r.json()
             items = (data.get("dataset", {}) or {}).get("data", [])
-            # Retorna lista de tuplas (Nome Amigável, ID)
             return [(i.get("NMESTRUTURA", "Sem Nome"), i.get("NRESTRUTURAM")) for i in items]
     except Exception as e:
         st.error(f"Erro ao buscar estruturas: {e}")
@@ -147,7 +146,7 @@ def eh_ate_hoje(oc) -> bool:
     return d <= hoje
 
 # ==============================================================================
-# 4. SIDEBAR (Apenas Logo e Usuário)
+# 4. SIDEBAR
 # ==============================================================================
 with st.sidebar:
     if logo := carregar_logo(): 
@@ -167,19 +166,18 @@ with st.sidebar:
 # 5. CORPO PRINCIPAL
 # ==============================================================================
 st.title("🚀 Aprova Turbo")
-st.markdown("Busque ocorrências pendentes e aprove em lote com alta velocidade.")
+st.markdown("Busque ocorrências pendentes e filtre pelos motivos agrupados.")
 
 # Estado da Sessão Requests
 if "session_api" not in st.session_state:
     st.session_state["session_api"] = requests.Session()
 
-# --- ÁREA DE FILTROS (MOVIDA PARA CÁ) ---
+# --- ÁREA DE PARÂMETROS ---
 with st.container(border=True):
-    st.subheader("⚙️ Filtros de Busca e Aprovação")
+    st.subheader("⚙️ Parâmetros de Busca")
     
     c1, c2 = st.columns(2)
     
-    # Selectbox de Estruturas
     estruturas_opcoes = fetch_estruturas()
     with c1:
         estrutura_selecionada = st.selectbox(
@@ -190,7 +188,6 @@ with st.container(border=True):
         )
         nrestrut_val = estrutura_selecionada[1] if estrutura_selecionada else ""
 
-    # Selectbox de Períodos
     periodos_opcoes = fetch_periodos()
     with c2:
         periodo_selecionado = st.selectbox(
@@ -201,117 +198,138 @@ with st.container(border=True):
         )
         nrperiodo_val = periodo_selecionado[1] if periodo_selecionado else ""
 
-    st.divider()
-    
-    c3, c4, c5 = st.columns([2, 1, 1])
+    c3, c4 = st.columns([1, 1])
     with c3:
-        motivo_alvo = st.text_input("📝 Motivo (Palavra-chave):", value="ausência de marcação / entrada e saída")
-    with c4:
-        st.write("") # Espaçamento
-        st.write("") 
-        somente_ate_hoje = st.checkbox("Apenas até Hoje?", value=True)
-    with c5:
         max_workers = st.slider("Threads (Velocidade)", 1, 50, 10)
-
-    # --- BOTÃO DE BUSCA (Neutro) ---
-    if st.button("🔎 Buscar Ocorrências", use_container_width=True):
-        if not nrestrut_val or not nrperiodo_val:
-            st.warning("Selecione Estrutura e Período acima.")
-        else:
-            with st.spinner("Consultando Teknisa..."):
-                try:
-                    lista = fetch_ocorrencias(st.session_state["session_api"], nrestrut_val, nrperiodo_val)
-                    st.session_state["ocorrencias_raw"] = lista
-                    
-                    if not lista:
-                        st.warning("Nenhuma ocorrência encontrada neste período/estrutura.")
-                    else:
-                        st.success(f"{len(lista)} registros baixados.")
-                except Exception as e:
-                    st.error(f"Erro na busca: {e}")
+    with c4:
+        st.write("") 
+        if st.button("🔎 Buscar Todas Ocorrências", type="primary", use_container_width=True):
+            if not nrestrut_val or not nrperiodo_val:
+                st.warning("Selecione Estrutura e Período acima.")
+            else:
+                with st.spinner("Consultando Teknisa (Buscando TUDO)..."):
+                    try:
+                        # Busca sem filtro inicial de texto
+                        lista = fetch_ocorrencias(st.session_state["session_api"], nrestrut_val, nrperiodo_val)
+                        st.session_state["ocorrencias_raw"] = lista
+                        
+                        if not lista:
+                            st.warning("Nenhuma ocorrência encontrada neste período/estrutura.")
+                        else:
+                            st.success(f"{len(lista)} registros baixados.")
+                    except Exception as e:
+                        st.error(f"Erro na busca: {e}")
 
 # ==============================================================================
-# 6. EXIBIÇÃO DE RESULTADOS
+# 6. FILTRAGEM INTELIGENTE E APROVAÇÃO
 # ==============================================================================
 st.divider()
 
 raw_data = st.session_state.get("ocorrencias_raw", [])
 
 if raw_data:
-    # --- APLICAÇÃO DOS FILTROS ---
-    motivo_norm = motivo_alvo.strip().lower()
+    st.subheader("🕵️ Filtragem e Aprovação")
     
-    def filtro_custom(oc):
-        # 1. Filtro de Motivo
-        txt_motivo = (oc.get("DSMOTIVOOCORFREQ") or "").lower()
-        txt_tipo = (oc.get("NMTIPOPROGOCORRENCIA") or "").lower()
-        txt_obs = (oc.get("DSOBSERVACAO") or "").lower()
-        
-        match_motivo = (motivo_norm in txt_motivo) or (motivo_norm in txt_tipo) or (motivo_norm in txt_obs)
-        
-        # 2. Filtro de Data
-        match_data = eh_ate_hoje(oc) if somente_ate_hoje else True
-        
-        return match_motivo and match_data
-
-    filtradas = [x for x in raw_data if filtro_custom(x)]
-    st.session_state["ocorrencias_filtradas"] = filtradas
-
-    # --- TABELA E AÇÃO ---
-    if filtradas:
-        st.markdown(f"### 📋 Registros Prontos para Aprovação: **{len(filtradas)}**")
-        
-        df_view = pd.DataFrame(filtradas)
-        cols_show = ["NMVINCULOM", "DTINICIOPROGOCOR", "DSMOTIVOOCORFREQ", "DSOBSERVACAO"]
-        cols_exist = [c for c in cols_show if c in df_view.columns]
-        
-        st.dataframe(
-            df_view[cols_exist],
-            use_container_width=True,
-            hide_index=True
+    # --- AGRUPAMENTO DE MOTIVOS ---
+    # Extrai todos os motivos únicos presentes nos dados baixados
+    # Trata valores nulos com "SEM MOTIVO REGISTRADO"
+    todos_motivos = sorted(list({
+        (item.get("DSMOTIVOOCORFREQ") or "SEM MOTIVO REGISTRADO").strip() 
+        for item in raw_data
+    }))
+    
+    col_filter_1, col_filter_2 = st.columns([3, 1])
+    
+    with col_filter_1:
+        # Aqui está o seletor que você pediu
+        motivos_selecionados = st.multiselect(
+            "📂 Selecione os Motivos para Aprovar (Agrupados):",
+            options=todos_motivos,
+            placeholder="Selecione um ou mais motivos..."
         )
         
-        st.warning("⚠️ Atenção: Ao clicar abaixo, o sistema iniciará a aprovação em massa.")
-        
-        # --- BOTÃO TURBO (NEUTRO) ---
-        if st.button(f"🚀 APROVAR {len(filtradas)} OCORRÊNCIAS AGORA", use_container_width=True):
-            logs_container = st.container(height=300)
-            progress_bar = st.progress(0)
-            
-            total = len(filtradas)
-            concluidos = 0
-            sucessos = 0
-            
-            with requests.Session() as s:
-                # Configura Retry
-                adapter = requests.adapters.HTTPAdapter(max_retries=2)
-                s.mount('https://', adapter)
-                
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(aprovar_single_ocorrencia, s, item): item 
-                        for item in filtradas
-                    }
-                    
-                    for future in as_completed(futures):
-                        concluidos += 1
-                        is_ok, msg, _ = future.result()
-                        
-                        if is_ok:
-                            sucessos += 1
-                            logs_container.success(msg)
-                        else:
-                            logs_container.error(msg)
-                        
-                        progress_bar.progress(concluidos / total)
-            
-            st.success(f"Processo finalizado! {sucessos}/{total} aprovados.")
-            st.balloons()
+    with col_filter_2:
+        somente_ate_hoje = st.toggle("Apenas datas passadas/hoje?", value=True)
+
+    # --- LÓGICA DE FILTRAGEM ---
+    filtradas = []
+    
+    if not motivos_selecionados:
+        st.info("👆 Selecione pelo menos um motivo acima para ver os resultados.")
     else:
-        st.info("Nenhuma ocorrência da lista corresponde aos filtros de Motivo/Data informados.")
+        for oc in raw_data:
+            motivo_atual = (oc.get("DSMOTIVOOCORFREQ") or "SEM MOTIVO REGISTRADO").strip()
+            
+            # 1. Filtro de Motivo (Exato, baseado na seleção)
+            if motivo_atual in motivos_selecionados:
+                # 2. Filtro de Data
+                if somente_ate_hoje:
+                    if eh_ate_hoje(oc):
+                        filtradas.append(oc)
+                else:
+                    filtradas.append(oc)
+
+        st.session_state["ocorrencias_filtradas"] = filtradas
+
+        # --- TABELA E AÇÃO ---
+        if filtradas:
+            st.markdown(f"### 📋 {len(filtradas)} Ocorrências Selecionadas")
+            
+            df_view = pd.DataFrame(filtradas)
+            cols_show = ["NMVINCULOM", "DTINICIOPROGOCOR", "DSMOTIVOOCORFREQ", "DSOBSERVACAO"]
+            cols_exist = [c for c in cols_show if c in df_view.columns]
+            
+            st.dataframe(
+                df_view[cols_exist],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.warning(f"⚠️ Atenção: Você está prestes a aprovar **{len(filtradas)}** ocorrências do(s) motivo(s): {', '.join(motivos_selecionados)}.")
+            
+            # --- BOTÃO TURBO ---
+            if st.button(f"🚀 APROVAR {len(filtradas)} OCORRÊNCIAS AGORA", type="primary", use_container_width=True):
+                logs_container = st.container(height=300)
+                progress_bar = st.progress(0)
+                
+                total = len(filtradas)
+                concluidos = 0
+                sucessos = 0
+                
+                with requests.Session() as s:
+                    adapter = requests.adapters.HTTPAdapter(max_retries=2)
+                    s.mount('https://', adapter)
+                    
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        futures = {
+                            executor.submit(aprovar_single_ocorrencia, s, item): item 
+                            for item in filtradas
+                        }
+                        
+                        for future in as_completed(futures):
+                            concluidos += 1
+                            is_ok, msg, _ = future.result()
+                            
+                            if is_ok:
+                                sucessos += 1
+                                logs_container.success(msg)
+                            else:
+                                logs_container.error(msg)
+                            
+                            progress_bar.progress(concluidos / total)
+                
+                st.success(f"Processo finalizado! {sucessos}/{total} aprovados.")
+                
+                # Limpa a lista para forçar nova busca ou evitar duplicidade visual
+                st.session_state["ocorrencias_raw"] = [] 
+                st.session_state["ocorrencias_filtradas"] = []
+                st.balloons()
+                
+        else:
+            st.warning("Nenhum registro encontrado com os filtros selecionados (verifique a opção de 'Apenas até hoje').")
 
 elif st.session_state.get("ocorrencias_raw") is not None:
-    # Lista vazia retornada da API
+    # Caso a busca tenha retornado vazio da API
     pass
 else:
-    st.info("👈 Configure os filtros acima e clique em 'Buscar Ocorrências' para começar.")
+    st.info("👈 Configure a estrutura e período acima para começar.")
