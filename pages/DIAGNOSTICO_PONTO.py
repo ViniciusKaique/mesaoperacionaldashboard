@@ -122,14 +122,40 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. API PORTAL GESTOR
+# 4. API PORTAL GESTOR (NOVAS FUNÇÕES ADICIONADAS)
 # ==============================================================================
-def fetch_ids_portal_gestor(data_ref):
+
+@st.cache_data(ttl=3600)
+def fetch_estruturas_gestor():
+    """Busca a lista de Estruturas/Tomadores disponíveis"""
+    url = "https://portalgestor.teknisa.com/backend/index.php/getEstruturasGerenciais"
+    params = {
+        "requestType": "FilterData",
+        "NRORG": PG_NR_ORG,
+        "CDOPERADOR": PG_CD_OPERADOR
+    }
+    headers = {
+        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
+        "User-Agent": "Mozilla/5.0"
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            items = (data.get("dataset", {}) or {}).get("data", [])
+            # Retorna lista de tuplas (Nome, ID)
+            return [(i.get("NMESTRUTURA", "Sem Nome"), i.get("NRESTRUTURAM")) for i in items]
+    except Exception as e:
+        st.error(f"Erro ao buscar estruturas: {e}")
+    return []
+
+def fetch_ids_portal_gestor(data_ref, codigo_estrutura):
+    """Agora aceita o código da estrutura dinamicamente"""
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
     params = {
         "requestType": "FilterData",
         "DIA": data_ref.strftime("%d/%m/%Y"),
-        "NRESTRUTURAM": "101091998",
+        "NRESTRUTURAM": codigo_estrutura, # <-- ID Dinâmico
         "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
     }
     headers = {
@@ -209,12 +235,8 @@ def decimal_para_hora(val):
 # ==============================================================================
 @st.cache_data(ttl=300)
 def fetch_dias_demonstrativo(vinculo, periodo):
-    """ Busca dados do espelho com tratamento de chaves variáveis e casing """
     url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
-    
-    # Limpeza do vinculo para garantir que é apenas números (sem .0)
     vinculo_limpo = str(vinculo).replace('.0', '').strip()
-    
     params = {
         "requestType": "FilterData",
         "NRVINCULOM": vinculo_limpo,
@@ -223,9 +245,7 @@ def fetch_dias_demonstrativo(vinculo, periodo):
         "CDOPERADOR": PG_CD_OPERADOR
     }
     headers = {
-        "OAuth-Token": PG_TOKEN, 
-        "OAuth-Cdoperador": PG_CD_OPERADOR, 
-        "OAuth-Nrorg": PG_NR_ORG,
+        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
         "User-Agent": "Mozilla/5.0"
     }
     try:
@@ -234,7 +254,6 @@ def fetch_dias_demonstrativo(vinculo, periodo):
             data = r.json()
             dataset = data.get("dataset", {})
             items = dataset.get("data") or dataset.get("getDiasDemonstrativo") or []
-            
             if items:
                 df = pd.DataFrame(items)
                 df.columns = df.columns.str.upper().str.strip()
@@ -293,6 +312,22 @@ if "dados_cache" not in st.session_state:
 
 with st.sidebar:
     st.header("Parâmetros")
+
+    # --- NOVO: SELETOR DE ESTRUTURA/TOMADOR ---
+    estruturas_opcoes = fetch_estruturas_gestor()
+    if estruturas_opcoes:
+        est_selecionada = st.selectbox(
+            "🏢 Tomador (Estrutura):",
+            options=estruturas_opcoes,
+            format_func=lambda x: x[0]
+        )
+        # Pega o ID (ex: 101091998)
+        estrutura_id = est_selecionada[1]
+    else:
+        # Fallback caso a API de estruturas falhe
+        estrutura_id = st.text_input("Estrutura ID (NRESTRUTURAM)", value="101091998")
+
+    st.divider()
     
     df_periodos = fetch_periodos_apuracao()
     periodo_apuracao = "1904"
@@ -312,7 +347,9 @@ with st.sidebar:
     mes_competencia = st.text_input("Mês Competência (HCM)", value=competencia_sugerida)
     data_ref = st.date_input("Data Ref. (Para Lista de Ativos)", datetime.now())
     
-    st.divider()
+    # --- NOVO: FILTRO DE POSTOS (Placeholder que será preenchido após busca) ---
+    st.markdown("---")
+    st.caption("Filtros adicionais aparecerão após a busca.")
     
     if st.button("🚀 Disparar Análise", use_container_width=True):
         st.session_state["busca_realizada"] = True
@@ -325,16 +362,23 @@ if st.session_state["busca_realizada"]:
     # 1. BUSCA DADOS (SE NECESSÁRIO)
     if not st.session_state["dados_cache"]:
         with st.status("🔄 Analisando...", expanded=True) as status:
-            status.write("Buscando funcionários ativos...")
-            df_funcionarios = fetch_ids_portal_gestor(data_ref)
+            status.write(f"Buscando funcionários ativos na estrutura {estrutura_id}...")
+            
+            # Passa a estrutura selecionada
+            df_funcionarios = fetch_ids_portal_gestor(data_ref, estrutura_id)
+            
             if df_funcionarios.empty:
-                status.update(label="❌ Lista vazia.", state="error")
+                status.update(label="❌ Lista vazia ou erro na estrutura.", state="error")
                 st.session_state["busca_realizada"] = False
                 st.stop()
-                
+            
+            # Garante que temos a coluna de Posto/Escola
+            if 'NMESTRUTGEREN' not in df_funcionarios.columns:
+                df_funcionarios['NMESTRUTGEREN'] = "GERAL"
+
             lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
             
-            status.write("Consultando ocorrências no HCM...")
+            status.write(f"Consultando ocorrências para {len(lista_ids)} vínculos...")
             token_hcm = obter_sessao_hcm()
             if not token_hcm:
                 status.update(label="❌ Falha login HCM.", state="error")
@@ -351,15 +395,34 @@ if st.session_state["busca_realizada"]:
             status.update(label="Sucesso!", state="complete", expanded=False)
 
     # 2. RECUPERA DO CACHE
-    df_funcionarios = st.session_state["dados_cache"]["funcionarios"]
-    df_ocorrencias = st.session_state["dados_cache"]["ocorrencias"]
+    df_funcionarios = st.session_state["dados_cache"]["funcionarios"].copy()
+    df_ocorrencias = st.session_state["dados_cache"]["ocorrencias"].copy()
     periodo_apuracao_cache = st.session_state["dados_cache"]["periodo_apuracao"]
 
+    # --- 3. FILTRO DE POSTO (LOCAL) ---
+    # Mostra um multiselect logo acima dos dados para filtrar por Posto/Escola
+    postos_disponiveis = sorted(df_funcionarios['NMESTRUTGEREN'].dropna().unique().tolist())
+    
+    # Usamos columns para não ocupar a tela toda
+    f1, f2 = st.columns([3, 1])
+    with f1:
+        postos_selecionados = st.multiselect("🔍 Filtrar por Posto/Escola:", postos_disponiveis, placeholder="Todos os postos")
+    
+    # Aplica filtro se houver seleção
+    if postos_selecionados:
+        df_funcionarios = df_funcionarios[df_funcionarios['NMESTRUTGEREN'].isin(postos_selecionados)]
+        # Se filtrou os funcionários, precisamos garantir que as ocorrências também respeitem esses IDs
+        ids_filtrados = df_funcionarios['NRVINCULOM'].astype(str).tolist()
+        if not df_ocorrencias.empty:
+            df_ocorrencias['NRVINCULOM'] = df_ocorrencias['NRVINCULOM'].astype(str)
+            df_ocorrencias = df_ocorrencias[df_ocorrencias['NRVINCULOM'].isin(ids_filtrados)]
+
+    # Prepara Mapas
     df_funcionarios['NRVINCULOM'] = df_funcionarios['NRVINCULOM'].astype(str)
     mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMVINCULOM']))
     mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMESTRUTGEREN']))
 
-    # 3. PROCESSAMENTO
+    # 4. PROCESSAMENTO FINAL
     hoje_str = datetime.now().strftime('%Y-%m-%d')
     ocorrencias_filtradas = pd.DataFrame()
     
@@ -374,7 +437,7 @@ if st.session_state["busca_realizada"]:
             st.toast(f"ℹ️ Ocorrências de hoje ({hoje_str}) foram ignoradas.")
     
     if ocorrencias_filtradas.empty:
-        st.success("🎉 Nenhuma falta ou atraso encontrado (exceto hoje)!")
+        st.success("🎉 Nenhuma falta ou atraso encontrado para os filtros selecionados (exceto hoje)!")
     else:
         ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
         ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
@@ -410,7 +473,6 @@ if st.session_state["busca_realizada"]:
 
         tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
         
-        # Variável para controlar qual funcionário será aberto no modal (EVITA O ERRO DE MÚLTIPLOS DIALOGS)
         func_para_abrir = None
         
         # --- TAB 1: FALTAS ---
@@ -443,7 +505,7 @@ if st.session_state["busca_realizada"]:
                     func_para_abrir = df_show2.iloc[idx]
             else: st.info("Sem atrasos.")
 
-        # --- TAB 3: PONTO EXCELENTE (AGORA CLICÁVEL) ---
+        # --- TAB 3: PONTO EXCELENTE ---
         with tab3:
             event3 = st.dataframe(
                 df_sem[['NRVINCULOM', 'Funcionario', 'Escola']], 
@@ -468,7 +530,7 @@ if st.session_state["busca_realizada"]:
                 csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
                 st.download_button("📥 Baixar CSV", csv, "relatorio.csv", "text/csv")
 
-        # --- CHAMADA CENTRALIZADA DO MODAL (EVITA ERRO DE MÚLTIPLOS OPENS) ---
+        # --- CHAMADA CENTRALIZADA DO MODAL ---
         if func_para_abrir is not None:
             mostrar_espelho_modal(
                 func_para_abrir['Funcionario'], 
