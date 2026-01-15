@@ -7,3 +7,4 @@ Pillow
 SQLAlchemy
 psycopg2-binary
 streamlit-lottie
+pytz

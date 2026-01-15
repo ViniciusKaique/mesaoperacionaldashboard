@@ -5,7 +5,8 @@ import plotly.express as px
 import numpy as np 
 from PIL import Image
 from sqlalchemy import text
-from datetime import date
+from datetime import datetime, date
+import pytz # Necessário para o fuso horário
 
 # ==============================================================================
 # CONFIGURAÇÕES E CONSTANTES
@@ -28,6 +29,12 @@ def configurar_pagina():
 def carregar_logo():
     try: return Image.open("logo.png")
     except: return None
+
+# --- NOVA FUNÇÃO: DATA BRASIL ---
+def obter_data_brasil():
+    """Retorna a data atual baseada no fuso horário de São Paulo."""
+    timezone = pytz.timezone('America/Sao_Paulo')
+    return datetime.now(timezone).date()
 
 def realizar_login():
     try:
@@ -67,17 +74,15 @@ def buscar_dados_auxiliares(_conn):
     return df_unidades, df_cargos
 
 @st.cache_data(ttl=60, show_spinner=False) 
-def buscar_dados_operacionais(_conn):
+def buscar_dados_operacionais(_conn, data_ref):
     # --- 1. QUERY QUADRO (EDITAL VS REAL) ---
-    # AJUSTE: O LEFT JOIN com ColaboradoresVolantes + WHERE v."ColaboradorID" IS NULL
-    # garante que volantes NÃO sejam contados no 'QtdReal'
     query_resumo = """
     WITH ContagemReal AS (
         SELECT c."UnidadeID", c."CargoID", COUNT(*) as "QtdReal"
         FROM "Colaboradores" c
         LEFT JOIN "ColaboradoresVolantes" v ON c."ColaboradorID" = v."ColaboradorID"
         WHERE c."Ativo" = TRUE 
-          AND v."ColaboradorID" IS NULL  -- <--- ESTA LINHA EXCLUI OS VOLANTES DA CONTAGEM
+          AND v."ColaboradorID" IS NULL 
         GROUP BY c."UnidadeID", c."CargoID"
     )
     SELECT 
@@ -100,7 +105,6 @@ def buscar_dados_operacionais(_conn):
     """
     
     # --- 2. QUERY FUNCIONÁRIOS (LISTAGEM) ---
-    # AJUSTE: Também excluímos eles da lista visual das escolas
     query_funcionarios = """
     SELECT u."UnidadeID", u."NomeUnidade" AS "Escola", c."NomeCargo" AS "Cargo", col."Nome" AS "Funcionario", col."ColaboradorID" AS "ID"
     FROM "Colaboradores" col
@@ -108,20 +112,19 @@ def buscar_dados_operacionais(_conn):
     JOIN "Cargos" c ON col."CargoID" = c."CargoID"
     LEFT JOIN "ColaboradoresVolantes" v ON col."ColaboradorID" = v."ColaboradorID"
     WHERE col."Ativo" = TRUE 
-      AND v."ColaboradorID" IS NULL -- <--- VOLANTES NÃO APARECEM NA LISTA DA ESCOLA
+      AND v."ColaboradorID" IS NULL
     ORDER BY u."NomeUnidade", c."NomeCargo", col."Nome";
     """
 
-    # --- 3. QUERY ALOCAÇÕES ---
+    # --- 3. QUERY ALOCAÇÕES (USANDO A DATA BRASIL) ---
     query_alocacoes = """
     SELECT av."ColaboradorID" AS "ID", av."UnidadeDestinoID", u."NomeUnidade" AS "EscolaDestino"
     FROM "AlocacaoVolantes" av
     JOIN "Unidades" u ON av."UnidadeDestinoID" = u."UnidadeID"
-    WHERE av."DataAlocacao" = CURRENT_DATE
+    WHERE av."DataAlocacao" = :data_ref
     """
 
-    # --- 4. QUERY BASES DE VOLANTES (Para o Modal de Gestão) ---
-    # Aqui trazemos APENAS os volantes
+    # --- 4. QUERY BASES DE VOLANTES ---
     query_volantes_base = """
     SELECT 
         cv."ColaboradorID" AS "ID", 
@@ -139,7 +142,8 @@ def buscar_dados_operacionais(_conn):
     df_pessoas = _conn.query(query_funcionarios)
     
     try:
-        df_alocacoes = _conn.query(query_alocacoes)
+        # Passamos a data parametrizada aqui
+        df_alocacoes = _conn.query(query_alocacoes, params={'data_ref': data_ref})
     except:
         df_alocacoes = pd.DataFrame(columns=["ID", "UnidadeDestinoID", "EscolaDestino"])
 
@@ -150,7 +154,6 @@ def buscar_dados_operacionais(_conn):
 
     # --- PROCESSAMENTO DOS VOLANTES ---
     if not df_volantes_info.empty:
-        # Junta com o Status de Alocação (Se está cobrindo alguém hoje)
         df_volantes_status = pd.merge(df_volantes_info, df_alocacoes, on="ID", how="left")
         
         df_volantes_status['Status_Texto'] = np.where(df_volantes_status['UnidadeDestinoID'].notnull(), 
@@ -160,7 +163,6 @@ def buscar_dados_operacionais(_conn):
     else:
         df_volantes_status = pd.DataFrame()
 
-    # Processamento do Resumo Geral
     condicoes = [df_resumo['Diferenca_num'] < 0, df_resumo['Diferenca_num'] > 0]
     df_resumo['Status_Codigo'] = np.select(condicoes, ['FALTA', 'EXCEDENTE'], default='OK')
     df_resumo['Status_Display'] = np.select(condicoes, ['🔴 FALTA', '🔵 EXCEDENTE'], default='🟢 OK')
@@ -185,48 +187,52 @@ def acao_atualizar_data(unidade_id, nova_data, conn):
         st.error(f"Erro: {e}")
 
 # ==============================================================================
-# NOVAS FUNÇÕES: REGISTRO HISTÓRICO
+# NOVAS FUNÇÕES: REGISTRO HISTÓRICO (Com Data Explícita)
 # ==============================================================================
-def registrar_historico_uso(conn):
-    """Calcula e salva o % de uso dos volantes na data de hoje."""
+def registrar_historico_uso(conn, data_ref):
+    """Calcula e salva o % de uso dos volantes na data de referência (Brasil)."""
     try:
-        # 1. Conta Total de Volantes (Baseado na nova tabela)
         q_total = text('SELECT COUNT(*) FROM "ColaboradoresVolantes"')
-        # 2. Conta Alocados Hoje
-        q_aloc = text('SELECT COUNT(*) FROM "AlocacaoVolantes" WHERE "DataAlocacao" = CURRENT_DATE')
+        # Conta alocados NA DATA DO BRASIL
+        q_aloc = text('SELECT COUNT(*) FROM "AlocacaoVolantes" WHERE "DataAlocacao" = :d')
         
         with conn.session as s:
             total = s.execute(q_total).scalar()
-            alocados = s.execute(q_aloc).scalar()
+            alocados = s.execute(q_aloc, {'d': data_ref}).scalar()
             
             if total > 0:
                 pct = round((alocados / total) * 100, 2)
             else:
                 pct = 0.0
             
+            # Upsert usando a data correta
             s.execute(text("""
                 INSERT INTO "HistoricoVolantes" ("DataRegistro", "TotalVolantes", "QtdAlocados", "PercentualUso")
-                VALUES (CURRENT_DATE, :t, :a, :p)
+                VALUES (:d, :t, :a, :p)
                 ON CONFLICT ("DataRegistro") 
                 DO UPDATE SET "TotalVolantes" = :t, "QtdAlocados" = :a, "PercentualUso" = :p
-            """), {'t': total, 'a': alocados, 'p': pct})
+            """), {'d': data_ref, 't': total, 'a': alocados, 'p': pct})
             s.commit()
             
     except Exception as e:
         print(f"Erro ao registrar histórico: {e}")
 
 # ==============================================================================
-# AÇÕES VOLANTES
+# AÇÕES VOLANTES (Com Data Explícita)
 # ==============================================================================
-def acao_alocar_volante(colab_id, unidade_destino_id, conn):
+def acao_alocar_volante(colab_id, unidade_destino_id, conn, data_ref):
     try:
         with conn.session as s:
-            s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "ColaboradorID" = :id AND "DataAlocacao" = CURRENT_DATE'), {'id': colab_id})
-            s.execute(text('INSERT INTO "AlocacaoVolantes" ("ColaboradorID", "UnidadeDestinoID", "DataAlocacao") VALUES (:cid, :uid, CURRENT_DATE)'),
-                      {'cid': colab_id, 'uid': unidade_destino_id})
+            # Limpa qualquer alocação anterior NESTA DATA
+            s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "ColaboradorID" = :id AND "DataAlocacao" = :d'), 
+                      {'id': colab_id, 'd': data_ref})
+            
+            # Insere a nova alocação NESTA DATA
+            s.execute(text('INSERT INTO "AlocacaoVolantes" ("ColaboradorID", "UnidadeDestinoID", "DataAlocacao") VALUES (:cid, :uid, :d)'),
+                      {'cid': colab_id, 'uid': unidade_destino_id, 'd': data_ref})
             s.commit()
         
-        registrar_historico_uso(conn)
+        registrar_historico_uso(conn, data_ref)
 
         st.cache_data.clear()
         st.toast("Volante alocado!", icon="🚙")
@@ -234,13 +240,15 @@ def acao_alocar_volante(colab_id, unidade_destino_id, conn):
     except Exception as e:
         st.error(f"Erro ao alocar: {e}")
 
-def acao_desalocar_volante(colab_id, conn):
+def acao_desalocar_volante(colab_id, conn, data_ref):
     try:
         with conn.session as s:
-            s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "ColaboradorID" = :id AND "DataAlocacao" = CURRENT_DATE'), {'id': colab_id})
+            # Remove alocação NESTA DATA
+            s.execute(text('DELETE FROM "AlocacaoVolantes" WHERE "ColaboradorID" = :id AND "DataAlocacao" = :d'), 
+                      {'id': colab_id, 'd': data_ref})
             s.commit()
         
-        registrar_historico_uso(conn)
+        registrar_historico_uso(conn, data_ref)
         
         st.cache_data.clear()
         st.toast("Volante liberado!", icon="🟢")
@@ -252,12 +260,13 @@ def acao_desalocar_volante(colab_id, conn):
 # MODAIS
 # ==============================================================================
 @st.dialog("🚙 Gestão de Volantes (Diário)", width="large")
-def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
+def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list, data_ref):
     
     tab_op, tab_hist = st.tabs(["🛠️ Operação Hoje", "📈 Histórico de Uso"])
 
     with tab_op:
-        st.markdown(f"### Status do Dia: {date.today().strftime('%d/%m/%Y')}")
+        # Exibe a data do Brasil para confirmar
+        st.markdown(f"### Status do Dia: {data_ref.strftime('%d/%m/%Y')}")
         
         if not df_volantes.empty:
             total = len(df_volantes)
@@ -296,7 +305,8 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                     if esta_alocado:
                         st.info(f"Em: **{row['EscolaDestino']}**")
                         if st.button("Desalocar"):
-                            acao_desalocar_volante(colab_id, conn)
+                            # Passa a data_ref
+                            acao_desalocar_volante(colab_id, conn, data_ref)
                     else:
                         st.success("**Disponível**")
             
@@ -308,7 +318,8 @@ def modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list):
                         
                         if st.form_submit_button("🚙 Confirmar Alocação"):
                             uid_dest = int(df_unidades_list[df_unidades_list['NomeUnidade'] == destino]['UnidadeID'].iloc[0])
-                            acao_alocar_volante(colab_id, uid_dest, conn)
+                            # Passa a data_ref
+                            acao_alocar_volante(colab_id, uid_dest, conn, data_ref)
         else:
             st.info("Nenhum volante cadastrado na tabela 'ColaboradoresVolantes'.")
 
@@ -390,7 +401,7 @@ def modal_detalhe_escola(escola_nome, row_stats, df_cargos_view, df_pessoas_view
                             
                             with conn.session as s:
                                 s.execute(text('UPDATE "Colaboradores" SET "UnidadeID"=:u, "CargoID"=:c, "Ativo"=:a WHERE "ColaboradorID"=:i'), 
-                                                {'u': uid_new, 'c': cid_new, 'a': n_atv, 'i': int(colab['ID'])})
+                                          {'u': uid_new, 'c': cid_new, 'a': n_atv, 'i': int(colab['ID'])})
                                 s.commit()
                             st.cache_data.clear()
                             st.toast("Sucesso!", icon="🎉")
@@ -409,7 +420,7 @@ def exibir_sidebar(authenticator, nome_usuario):
         st.divider()
         st.write(f"👤 **{nome_usuario}**"); authenticator.logout(location='sidebar')
 
-def exibir_metricas_topo(df, conn, df_volantes, df_unidades_list, df_cargos_list):
+def exibir_metricas_topo(df, conn, df_volantes, df_unidades_list, df_cargos_list, data_ref):
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2]) 
     
     total_edital = int(df['Edital'].sum())
@@ -431,8 +442,10 @@ def exibir_metricas_topo(df, conn, df_volantes, df_unidades_list, df_cargos_list
             st.metric("🚙 Volantes", "0")
             
         if st.button("Gerenciar Volantes"):
-            registrar_historico_uso(conn)
-            modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list)
+            # Atualiza histórico ao abrir
+            registrar_historico_uso(conn, data_ref)
+            # Passa a data_ref
+            modal_lista_volantes(df_volantes, conn, df_unidades_list, df_cargos_list, data_ref)
             modal_aberto_aqui = True 
             
     st.markdown("---")
@@ -469,17 +482,23 @@ def main():
     configurar_pagina()
     authenticator, nome_usuario = realizar_login()
     
+    # 1. DEFINE A DATA BRASIL (SP)
+    data_hoje_br = obter_data_brasil()
+    
     if authenticator:
         exibir_sidebar(authenticator, nome_usuario)
         
         try:
             conn = st.connection("postgres", type="sql")
             df_unidades_list, df_cargos_list = buscar_dados_auxiliares(conn)
-            df_resumo, df_pessoas, df_volantes = buscar_dados_operacionais(conn)
+            
+            # 2. PASSA A DATA CORRETA PARA A QUERY
+            df_resumo, df_pessoas, df_volantes = buscar_dados_operacionais(conn, data_hoje_br)
             
             st.title("📊 Mesa Operacional")
             
-            volantes_aberto = exibir_metricas_topo(df_resumo, conn, df_volantes, df_unidades_list, df_cargos_list)
+            # 3. PASSA A DATA PARA OS COMPONENTES QUE EXECUTAM AÇÕES
+            volantes_aberto = exibir_metricas_topo(df_resumo, conn, df_volantes, df_unidades_list, df_cargos_list, data_hoje_br)
             
             exibir_graficos_gerais(df_resumo)
 
