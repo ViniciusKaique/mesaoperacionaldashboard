@@ -3,40 +3,36 @@ import pandas as pd
 import requests
 import time
 import io
+import json
 from datetime import datetime
 
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-st.set_page_config(page_title="Extrator Relatório Gerencial", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Extrator Massivo SME", layout="wide", page_icon="🚜")
 
 # ==============================================================================
-# 2. SEGURANÇA E ESTADO (Herdado da página principal)
+# 2. SEGURANÇA E ESTADO
 # ==============================================================================
-# Verifica se o usuário fez login na página principal
 if not st.session_state.get("authentication_status"):
-    st.warning("🔒 Acesso restrito. Por favor, faça login na página inicial primeiro.")
+    st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# Verifica se temos o token. Se não tiver, tenta pegar do secrets (caso tenha hardcoded para dev)
 if 'api_token' not in st.session_state or not st.session_state['api_token']:
-    st.error("Token de autenticação não encontrado. Recarregue a página inicial.")
+    st.error("Token não encontrado. Recarregue a Home.")
     st.stop()
 
 # ==============================================================================
 # 3. CONFIGURAÇÃO API
 # ==============================================================================
-# Base URL muda ligeiramente para a raiz da API Web
 BASE_URL = "https://limpeza.sme.prefeitura.sp.gov.br/api/web"
 
-# Headers "Camuflados" (Crucial para passar pelo Firewall/WAF)
-# Mudamos o Referer para a área de relatórios
 HEADERS_TEMPLATE = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
     "Origin": "https://limpeza.sme.prefeitura.sp.gov.br",
-    "Referer": "https://limpeza.sme.prefeitura.sp.gov.br/relatorio/gerencial/", # <--- O Pulo do gato
+    "Referer": "https://limpeza.sme.prefeitura.sp.gov.br/relatorio/gerencial/",
     "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
@@ -45,185 +41,215 @@ HEADERS_TEMPLATE = {
     "Sec-Fetch-Site": "same-origin"
 }
 
-def get_auth_headers():
-    """Monta o header com o token da sessão atual."""
+def get_headers():
     h = HEADERS_TEMPLATE.copy()
-    token = st.session_state['api_token']
-    h["Authorization"] = f"Bearer {token}"
+    h["Authorization"] = f"Bearer {st.session_state['api_token']}"
     return h
 
 # ==============================================================================
-# 4. FUNÇÕES DE EXTRAÇÃO
+# 4. MOTOR DE EXTRAÇÃO (PAGINAÇÃO)
 # ==============================================================================
-def buscar_lista_escolas():
-    """Busca todos os IDs e Nomes das escolas."""
-    url = f"{BASE_URL}/unidade-escolar/combo-todos"
-    headers = get_auth_headers()
+def buscar_ids_via_tabela(mes, ano):
+    """
+    Varre a API de tabela paginada para pegar TODOS os IDs.
+    """
+    url = f"{BASE_URL}/relatorio/relatorio-gerencial/tabela"
+    headers = get_headers()
     
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        if r.status_code == 200:
-            return r.json() # Retorna lista de dicts [{'id': 1, 'descricao': 'Escola X'}, ...]
-        else:
-            st.error(f"Erro ao buscar lista: {r.status_code}")
-            return []
-    except Exception as e:
-        st.error(f"Erro de conexão: {e}")
-        return []
+    lista_final = []
+    start = 0
+    length = 100 # Tenta pegar 100 por vez para ser mais rápido
+    total_registros = 1 # Valor dummy para iniciar o loop
+    
+    status_msg = st.empty()
+    
+    while start < total_registros:
+        # Filtro obrigatório para a tabela funcionar
+        filtros = json.dumps({"mes": str(mes), "ano": int(ano)})
+        
+        params = {
+            "draw": "1",
+            "filters": filtros,
+            "length": length,
+            "start": start
+        }
+        
+        try:
+            status_msg.text(f"🔄 Buscando página (Start: {start})...")
+            r = requests.get(url, headers=headers, params=params, timeout=20)
+            
+            if r.status_code == 200:
+                data = r.json()
+                
+                # O formato do DataTables geralmente retorna 'data' e 'recordsTotal'
+                registros = data.get('data', [])
+                total_registros = int(data.get('recordsTotal', 0) or data.get('recordsFiltered', 0))
+                
+                if not registros:
+                    break
+                    
+                for item in registros:
+                    # Precisamos extrair o ID para buscar o detalhe depois.
+                    # O item geralmente vem com a estrutura da linha da tabela.
+                    # Vamos tentar pegar 'id' ou 'unidadeEscolar.id'
+                    u_id = item.get('id')
+                    
+                    # Nome da escola (pode estar aninhado)
+                    nome_escola = "Desconhecido"
+                    if 'unidadeEscolar' in item and isinstance(item['unidadeEscolar'], dict):
+                        nome_escola = item['unidadeEscolar'].get('descricao', 'Sem Nome')
+                    elif 'unidadeEscolar' in item:
+                        nome_escola = str(item['unidadeEscolar'])
+                    
+                    if u_id:
+                        lista_final.append({'id': u_id, 'nome': nome_escola})
+                
+                start += length
+                time.sleep(0.1) # Evita block
+            else:
+                st.error(f"Erro {r.status_code} na paginação.")
+                break
+        except Exception as e:
+            st.error(f"Erro na varredura: {e}")
+            break
+            
+    status_msg.empty()
+    return lista_final
 
-def buscar_detalhe_escola(id_escola):
-    """Busca o JSON detalhado de uma escola específica."""
-    url = f"{BASE_URL}/relatorio/relatorio-gerencial/{id_escola}"
-    headers = get_auth_headers()
-    
+def buscar_detalhe(id_relatorio):
+    """Busca o JSON completo de detalhe (equipe, valores, etc)."""
+    url = f"{BASE_URL}/relatorio/relatorio-gerencial/{id_relatorio}"
     try:
-        r = requests.get(url, headers=headers, timeout=15)
+        r = requests.get(url, headers=get_headers(), timeout=15)
         if r.status_code == 200:
             return r.json()
-        return None
     except:
-        return None
+        pass
+    return None
 
-def processar_json_para_linha(dado, id_escola, nome_escola):
-    """Achata o JSON complexo para uma linha simples de Excel."""
-    # O JSON pode vir direto ou dentro de 'data'
-    obj = dado.get('data', dado) if isinstance(dado, dict) else dado
+def achatar_dados(json_detalhe, id_origem, nome_origem):
+    """Transforma o JSON complexo em linha de Excel."""
+    dado = json_detalhe.get('data', json_detalhe)
+    if not dado: return None
     
-    # Proteção para campos nulos
-    ue = obj.get('unidadeEscolar', {}) or {}
-    prest = obj.get('prestadorServico', {}) or {}
+    # Se retornar lista (histórico), pega o primeiro ou processa todos (aqui assume 1 por ID)
+    if isinstance(dado, list): dado = dado[0]
     
-    # Cálculos da equipe
-    total_faltas = 0
-    total_desc_equipe = 0.0
-    equipe = obj.get('equipeAlocada', [])
-    if equipe and isinstance(equipe, list):
-        for func in equipe:
-            total_faltas += (func.get('quantidadeAusente') or 0)
-            val_desc = func.get('valorDesconto') or 0
-            try: total_desc_equipe += float(val_desc)
+    ue = dado.get('unidadeEscolar', {}) or {}
+    prest = dado.get('prestadorServico', {}) or {}
+    
+    # Soma equipe
+    faltas = 0
+    desc_eq = 0.0
+    equipe = dado.get('equipeAlocada', [])
+    if equipe:
+        for f in equipe:
+            faltas += (f.get('quantidadeAusente') or 0)
+            try: desc_eq += float(f.get('valorDesconto') or 0)
             except: pass
 
-    # Monta a linha
+    # Tenta pegar notas
+    nota_insumos = 0
+    nota_equipe = 0
+    detalhes_notas = dado.get('detalhe', [])
+    if detalhes_notas:
+        for d in detalhes_notas:
+            desc = str(d.get('descricao', '')).lower()
+            if 'insumo' in desc: nota_insumos = d.get('pontuacaoFinal', 0)
+            if 'equipe' in desc: nota_equipe = d.get('pontuacaoFinal', 0)
+
     return {
-        "ID Sistema": id_escola,
-        "Escola": nome_escola,
-        "Código EOL": ue.get('codigo', ''),
-        "Tipo": ue.get('tipo', ''),
-        "Mês Ref": obj.get('mes', ''),
-        "Ano Ref": obj.get('ano', ''),
-        "Nota Final": obj.get('pontuacaoFinal', 0),
-        "Valor Bruto": float(obj.get('valorBruto', 0) or 0),
-        "Valor Líquido": float(obj.get('valorLiquido', 0) or 0),
-        "Glosa RH": float(obj.get('descontoGlosaRh', 0) or 0),
-        "Total Faltas Equipe": total_faltas,
-        "Desc. Equipe (R$)": total_desc_equipe,
-        "Status Fiscal": "Aprovado" if obj.get('flagAprovadoFiscal') else "Pendente",
-        "Data Fiscal": obj.get('dataHoraAprovacaoFiscal', ''),
-        "Quem Fiscal": obj.get('nomeUsuarioAprovacaoFiscal', ''),
-        "Status DRE": "Aprovado" if obj.get('flagAprovadoDre') else "Pendente",
-        "Quem DRE": obj.get('nomeUsuarioAprovacaoDre', '')
+        "ID Relatório": id_origem,
+        "Escola": nome_origem,
+        "Cod EOL": ue.get('codigo', ''),
+        "Mês": dado.get('mes'),
+        "Ano": dado.get('ano'),
+        "Pontuação Final": dado.get('pontuacaoFinal'),
+        "Nota Equipe": nota_equipe,
+        "Nota Insumos": nota_insumos,
+        "Valor Bruto": f"{float(dado.get('valorBruto') or 0):.2f}".replace('.',','),
+        "Valor Líquido": f"{float(dado.get('valorLiquido') or 0):.2f}".replace('.',','),
+        "Glosa RH": f"{float(dado.get('descontoGlosaRh') or 0):.2f}".replace('.',','),
+        "Total Faltas": faltas,
+        "Desc. Equipe R$": f"{desc_eq:.2f}".replace('.',','),
+        "Status Fiscal": "Aprovado" if dado.get('flagAprovadoFiscal') else "Pendente",
+        "Data Fiscal": dado.get('dataHoraAprovacaoFiscal'),
+        "Fiscal": dado.get('nomeUsuarioAprovacaoFiscal'),
+        "Status DRE": "Aprovado" if dado.get('flagAprovadoDre') else "Pendente",
+        "Prestador": prest.get('razaoSocial')
     }
 
 # ==============================================================================
-# 5. UI - INTERFACE
+# 5. INTERFACE
 # ==============================================================================
-st.title("📊 Extrator de Relatório Gerencial (Consolidado)")
-st.markdown("Esta ferramenta varre todas as escolas cadastradas, extrai os detalhes financeiros e de equipe, e gera um Excel único.")
+st.title("🚜 Extrator Massivo SME (Paginação Automática)")
+st.info("Este extrator percorre todas as páginas da tabela para garantir que as 146 escolas sejam encontradas.")
 
-col1, col2 = st.columns([1, 4])
+c1, c2, c3 = st.columns(3)
+mes_sel = c1.number_input("Mês de Referência", min_value=1, max_value=12, value=12)
+ano_sel = c2.number_input("Ano de Referência", min_value=2024, max_value=2030, value=2025)
 
-with col1:
-    btn_iniciar = st.button("🚀 Iniciar Extração", type="primary", use_container_width=True)
-
-if btn_iniciar:
+if c3.button("🚀 Iniciar Varredura Completa", type="primary", use_container_width=True):
+    
+    # 1. VARREDURA (Paginação)
+    with st.status("🔍 Varrendo tabela paginada...", expanded=True) as status:
+        st.write("Conectando à API de Tabela...")
+        lista_escolas = buscar_ids_via_tabela(mes_sel, ano_sel)
+        
+        total = len(lista_escolas)
+        if total == 0:
+            status.update(label="❌ Nenhuma escola encontrada!", state="error")
+            st.stop()
+        
+        status.update(label=f"✅ Sucesso! {total} relatórios encontrados para {mes_sel}/{ano_sel}.", state="complete")
+    
     st.divider()
     
-    # 1. Pega a lista
-    with st.spinner("Conectando ao servidor e buscando lista de escolas..."):
-        lista_escolas = buscar_lista_escolas()
-    
-    if not lista_escolas:
-        st.error("Não foi possível obter a lista de escolas. Verifique se o token ainda é válido.")
-        st.stop()
-        
-    total_escolas = len(lista_escolas)
-    st.info(f"Lista obtida com sucesso! Encontradas **{total_escolas}** unidades.")
-    
-    # 2. Prepara barras de progresso
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    # 2. EXTRAÇÃO DETALHADA
+    st.write(f"📥 Baixando detalhes de **{total}** unidades...")
+    progress = st.progress(0)
+    bar_text = st.empty()
     
     dados_consolidados = []
     
-    # 3. Loop de Extração
     start_time = time.time()
     
-    # Container para mostrar logs em tempo real (opcional, para não poluir)
-    with st.expander("Ver logs de extração", expanded=True):
-        log_area = st.empty()
-        
     for i, item in enumerate(lista_escolas):
-        # Normaliza ID e Nome
-        u_id = item.get('id') or item.get('value')
-        u_nome = item.get('descricao') or item.get('text') or "Sem Nome"
+        perc = (i + 1) / total
+        progress.progress(perc)
+        bar_text.text(f"({i+1}/{total}) Extraindo: {item['nome']}")
         
-        if u_id:
-            # Atualiza UI
-            perc = (i + 1) / total_escolas
-            progress_bar.progress(perc)
-            status_text.text(f"Processando {i+1}/{total_escolas}: {u_nome}...")
-            
-            # Busca Detalhe
-            detalhe = buscar_detalhe_escola(u_id)
-            
-            if detalhe:
-                # O endpoint pode retornar lista (histórico) ou objeto único
-                dados_raw = detalhe.get('data', detalhe)
-                lista_processar = dados_raw if isinstance(dados_raw, list) else [dados_raw]
-                
-                for d in lista_processar:
-                    linha = processar_json_para_linha(d, u_id, u_nome)
-                    dados_consolidados.append(linha)
-            else:
-                log_area.warning(f"Falha ao baixar dados da unidade ID: {u_id}")
-            
-            # Sleep para não derrubar a API (Rate Limiting)
-            time.sleep(0.1)
-            
-    # 4. Finalização
-    tempo_total = time.time() - start_time
-    progress_bar.progress(100)
-    status_text.text("Concluído!")
+        detalhe = buscar_detalhe(item['id'])
+        
+        if detalhe:
+            linha = achatar_dados(detalhe, item['id'], item['nome'])
+            if linha: dados_consolidados.append(linha)
+        
+        # Pausa mínima para não travar
+        time.sleep(0.05)
     
+    tempo = time.time() - start_time
+    bar_text.text("Processamento finalizado!")
+    
+    # 3. EXCEL
     if dados_consolidados:
         df = pd.DataFrame(dados_consolidados)
-        
-        st.success(f"✅ Extração finalizada em {tempo_total:.1f}s! Total de registros: {len(df)}")
-        
-        # Preview
+        st.success(f"🎉 Extração concluída em {tempo:.1f}s. Registros processados: {len(df)}")
         st.dataframe(df.head(), use_container_width=True)
         
-        # Download Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Consolidado')
+            df.to_excel(writer, index=False, sheet_name='Base_SME')
+            worksheet = writer.sheets['Base_SME']
+            worksheet.set_column(0, 20, 18) # Ajuste largura colunas
             
-            # Ajuste automático de colunas (opcional, visual)
-            worksheet = writer.sheets['Consolidado']
-            for idx, col in enumerate(df.columns):
-                series = df[col]
-                max_len = max((series.astype(str).map(len).max(), len(str(col)))) + 1
-                worksheet.set_column(idx, idx, max_len)
-                
-        buffer.seek(0)
-        
         st.download_button(
-            label="📥 Baixar Excel Consolidado (.xlsx)",
+            label=f"💾 Baixar Relatório Completo ({mes_sel}_{ano_sel}).xlsx",
             data=buffer,
-            file_name=f"SME_Consolidado_{datetime.now().strftime('%Y-%m-%d_%H%M')}.xlsx",
+            file_name=f"SME_Geral_{mes_sel}-{ano_sel}.xlsx",
             mime="application/vnd.ms-excel",
-            type="primary"
+            type="primary",
+            use_container_width=True
         )
     else:
-        st.warning("Nenhum dado foi extraído.")
+        st.error("Houve erros na extração dos detalhes. Tente novamente.")
