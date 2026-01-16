@@ -162,13 +162,17 @@ def fetch_feriados_brasil(ano):
     try:
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
-            return r.json() # Retorna lista de dicts: [{'date': '2026-01-01', 'name': '...'}, ...]
+            return r.json() 
     except: pass
     return []
 
 def get_feriados_set(anos_lista):
     """Gera um dicionário { '2026-01-01': 'Ano Novo' } para os anos solicitados"""
     feriados_dict = {}
+    # Se a lista de anos vier vazia ou nula, garante o ano atual
+    if not anos_lista:
+        anos_lista = [datetime.now().year]
+        
     for ano in anos_lista:
         dados = fetch_feriados_brasil(ano)
         if dados:
@@ -379,11 +383,13 @@ if st.session_state["busca_realizada"]:
     # 1. BUSCA (CACHE)
     if not st.session_state["dados_cache"]:
         with st.status("🔄 Buscando dados...", expanded=True) as status:
+            # A) Lista de IDs da API
             df_func = fetch_ids_portal_gestor(data_ref, est_id)
             if df_func.empty:
                 status.update(label="❌ Sem funcionários.", state="error")
                 st.session_state["busca_realizada"] = False; st.stop()
             
+            # B) Mapa de Supervisores do Banco de Dados (Pelo ID)
             mapa_supervisores = fetch_mapa_supervisores_por_vinculo()
             
             if 'NMESTRUTGEREN' not in df_func.columns: df_func['NMESTRUTGEREN'] = "GERAL"
@@ -394,10 +400,14 @@ if st.session_state["busca_realizada"]:
                 status.update(label="❌ Erro Login HCM.", state="error")
                 st.session_state["busca_realizada"] = False; st.stop()
                 
+            # C) Ocorrências do HCM
             df_oco = fetch_ocorrencias_hcm_turbo(token, lista_ids, per_id, mes_hcm)
             
             st.session_state["dados_cache"] = {
-                "funcionarios": df_func, "ocorrencias": df_oco, "periodo": per_id, "mapa_sup": mapa_supervisores
+                "funcionarios": df_func, 
+                "ocorrencias": df_oco, 
+                "periodo": per_id, 
+                "mapa_sup": mapa_supervisores
             }
             status.update(label="Pronto!", state="complete", expanded=False)
             st.rerun()
@@ -495,7 +505,7 @@ if st.session_state["busca_realizada"]:
 
         st.divider()
         
-        # GRÁFICO
+        # GRÁFICO (Cores Ajustadas: Azul para Excelente)
         st.subheader("📊 Visão por Supervisor")
         grp_excelente = df_sem.groupby('Supervisor').size().reset_index(name='Ponto Excelente')
         if not resumo.empty:
@@ -508,7 +518,8 @@ if st.session_state["busca_realizada"]:
 
         fig = px.bar(
             df_chart, x='Supervisor', y=['Ponto Excelente', 'Com Ocorrências'],
-            barmode='group', color_discrete_map={'Ponto Excelente': '#28a745', 'Com Ocorrências': '#dc3545'},
+            barmode='group', 
+            color_discrete_map={'Ponto Excelente': '#1E90FF', 'Com Ocorrências': '#dc3545'}, # Azul e Vermelho
             text_auto=True
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -536,7 +547,6 @@ if st.session_state["busca_realizada"]:
         with t3:
             if not df_faltas_feriado.empty:
                 df_faltas_feriado['Supervisor'] = df_faltas_feriado['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
-                # Remove coluna Escola antes de mostrar
                 df_fer_show = df_faltas_feriado[['NRVINCULOM', 'Funcionario', 'Supervisor', 'DATA_INICIO', 'NOME_FERIADO']].drop_duplicates()
                 st.dataframe(df_fer_show, use_container_width=True, hide_index=True)
             else: st.success("Ninguém faltou em feriados!")
