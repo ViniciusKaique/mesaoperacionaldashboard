@@ -9,7 +9,7 @@ from datetime import datetime
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-st.set_page_config(page_title="Extrator Relatório Gerencial", layout="wide", page_icon="🚜")
+st.set_page_config(page_title="Extrator Massivo SME", layout="wide", page_icon="🚜")
 
 # ==============================================================================
 # 2. SEGURANÇA E ESTADO
@@ -27,7 +27,6 @@ if 'api_token' not in st.session_state or not st.session_state['api_token']:
 # ==============================================================================
 BASE_URL = "https://limpeza.sme.prefeitura.sp.gov.br/api/web"
 
-# Headers idênticos ao do navegador (Baseado no seu Log HAR)
 HEADERS_TEMPLATE = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -61,15 +60,16 @@ def buscar_todos_ids_paginados(mes, ano):
     
     # Parâmetros iniciais
     start = 0
-    length = 100 # Vamos tentar pegar 100 por vez para ser mais rápido (o padrão é 25)
-    total_records = 1 # Valor dummy para entrar no loop
+    length = 100 
+    total_records = 1 
     draw = 1
     
     status_text = st.empty()
+    debug_area = st.expander("🕵️ Diagnóstico da Requisição (Clique aqui se der erro)", expanded=False)
     
     while start < total_records:
-        # Filtro JSON stringificado conforme o log
-        filtros_json = json.dumps({"mes": str(mes), "ano": int(ano)})
+        # 🚨 CORREÇÃO: Força mes e ano como INTEIROS
+        filtros_json = json.dumps({"mes": int(mes), "ano": int(ano)})
         
         params = {
             "draw": str(draw),
@@ -79,7 +79,7 @@ def buscar_todos_ids_paginados(mes, ano):
         }
         
         try:
-            status_text.text(f"🔄 Varrendo tabela (Registro {start} em diante)...")
+            status_text.text(f"🔄 Varrendo página {draw} (Registro {start} em diante)...")
             
             r = requests.get(url, headers=headers, params=params, timeout=20)
             
@@ -87,29 +87,36 @@ def buscar_todos_ids_paginados(mes, ano):
                 data = r.json()
                 
                 # Atualiza o total de registros com a verdade da API
-                # O campo pode vir como 'recordsTotal' ou 'recordsFiltered'
                 total_records = int(data.get('recordsTotal', 0) or data.get('recordsFiltered', 0))
                 
+                # Debug na primeira chamada para garantir que o filtro funcionou
+                if start == 0:
+                    with debug_area:
+                        st.write("📤 **Filtros Enviados:**", filtros_json)
+                        st.write(f"📥 **Total Encontrado na API:** {total_records}")
+                        if total_records == 0:
+                            st.warning("A API retornou 0 registros. Verifique se há fechamento para este Mês/Ano.")
+
                 itens = data.get('data', [])
                 if not itens:
-                    break # Se não veio nada, para
+                    break 
                 
                 for item in itens:
-                    # Extrai ID e Nome para usar depois
                     u_id = item.get('id')
                     
-                    # Tenta pegar o nome da escola (pode estar aninhado)
+                    # Tenta pegar o nome da escola
                     u_nome = "Desconhecido"
-                    if 'unidadeEscolar' in item and isinstance(item['unidadeEscolar'], dict):
-                        u_nome = item['unidadeEscolar'].get('descricao', 'Desconhecido')
+                    if isinstance(item.get('unidadeEscolar'), dict):
+                        u_nome = item['unidadeEscolar'].get('descricao', 'Sem Nome')
+                    elif 'unidadeEscolar' in item:
+                        u_nome = str(item['unidadeEscolar'])
                     
                     if u_id:
                         lista_ids.append({'id': u_id, 'nome': u_nome})
                 
-                # Prepara para a próxima página
                 start += length
                 draw += 1
-                time.sleep(0.1) # Respira
+                time.sleep(0.1) 
             else:
                 st.error(f"Erro na paginação: {r.status_code} - {r.text}")
                 break
@@ -137,7 +144,7 @@ def processar_para_excel(dado_json, id_origem, nome_origem):
     # O JSON detalhado pode vir dentro de uma chave 'data' ou direto
     dado = dado_json.get('data', dado_json)
     
-    # Se for lista (histórico), pega o primeiro item (o mais recente)
+    # Se for lista (histórico), pega o primeiro item
     if isinstance(dado, list):
         if not dado: return None
         dado = dado[0]
@@ -148,7 +155,7 @@ def processar_para_excel(dado_json, id_origem, nome_origem):
     ue = dado.get('unidadeEscolar', {}) or {}
     prestador = dado.get('prestadorServico', {}) or {}
     
-    # Processa Equipe (Soma faltas e valores)
+    # Processa Equipe
     soma_faltas = 0
     soma_desc_equipe = 0.0
     lista_equipe = dado.get('equipeAlocada', [])
@@ -159,7 +166,7 @@ def processar_para_excel(dado_json, id_origem, nome_origem):
             try: soma_desc_equipe += float(func.get('valorDesconto') or 0)
             except: pass
 
-    # Tenta pegar notas específicas (Insumos vs Equipe) nos detalhes
+    # Notas específicas
     nota_insumos = 0
     nota_equipe = 0
     detalhes = dado.get('detalhe', [])
@@ -169,7 +176,7 @@ def processar_para_excel(dado_json, id_origem, nome_origem):
             if 'insumo' in desc: nota_insumos = d.get('pontuacaoFinal', 0)
             if 'equipe' in desc or 'atividade' in desc: nota_equipe = d.get('pontuacaoFinal', 0)
 
-    # Função auxiliar para formatar dinheiro BR
+    # Formatação Moeda
     def fmt_moeda(valor):
         try: return f"{float(valor):.2f}".replace('.', ',')
         except: return "0,00"
@@ -200,9 +207,9 @@ def processar_para_excel(dado_json, id_origem, nome_origem):
 # 5. INTERFACE DO USUÁRIO
 # ==============================================================================
 st.title("🚜 Extrator Massivo SME (Paginação)")
-st.markdown("Este módulo percorre todas as páginas da tabela, coleta os IDs e extrai os detalhes financeiros.")
+st.info("Este módulo percorre todas as páginas da tabela para garantir a extração completa.")
 
-# Filtros obrigatórios para a requisição da tabela funcionar
+# Filtros
 c1, c2, c3 = st.columns(3)
 mes_sel = c1.number_input("Mês de Referência", min_value=1, max_value=12, value=12)
 ano_sel = c2.number_input("Ano de Referência", min_value=2024, max_value=2030, value=2025)
@@ -217,7 +224,7 @@ if c3.button("🚀 Iniciar Extração Completa", type="primary", use_container_w
     total_encontrado = len(lista_final)
     
     if total_encontrado == 0:
-        st.warning("⚠️ Nenhum relatório encontrado para este período. Verifique Mês/Ano.")
+        st.error("⚠️ Nenhum relatório encontrado. Verifique o 'Diagnóstico' acima para ver o erro.")
         st.stop()
         
     st.success(f"✅ Lista carregada! Encontrados **{total_encontrado}** relatórios para processar.")
@@ -229,7 +236,7 @@ if c3.button("🚀 Iniciar Extração Completa", type="primary", use_container_w
     
     start_time = time.time()
     
-    # Container para erros (se houver)
+    # Container para erros
     err_container = st.container()
     
     for i, item in enumerate(lista_final):
@@ -248,7 +255,7 @@ if c3.button("🚀 Iniciar Extração Completa", type="primary", use_container_w
         else:
             err_container.error(f"Falha ao baixar ID: {item['id']}")
             
-        # Pequena pausa para evitar bloqueio
+        # Pausa
         time.sleep(0.05)
         
     tempo_total = time.time() - start_time
@@ -268,14 +275,15 @@ if c3.button("🚀 Iniciar Extração Completa", type="primary", use_container_w
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             df.to_excel(writer, index=False, sheet_name='Consolidado')
             worksheet = writer.sheets['Consolidado']
-            worksheet.set_column(0, 20, 20) # Ajuste largura
+            worksheet.set_column(0, 20, 20) 
             
         st.download_button(
             label=f"📥 Baixar Planilha Consolidada ({mes_sel}_{ano_sel})",
             data=buffer,
             file_name=f"Relatorio_SME_{mes_sel}-{ano_sel}.xlsx",
             mime="application/vnd.ms-excel",
-            type="primary"
+            type="primary",
+            use_container_width=True
         )
     else:
         st.error("Erro grave: Lista de IDs foi carregada, mas nenhum detalhe pôde ser extraído.")
