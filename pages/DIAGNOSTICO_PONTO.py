@@ -138,8 +138,6 @@ def fetch_mapa_supervisores_por_vinculo():
     """
     try:
         conn = st.connection("postgres", type="sql")
-        
-        # Query ajustada para buscar pelo ID do colaborador
         query = """
         SELECT 
             col."ColaboradorID" as "Matricula", 
@@ -150,15 +148,10 @@ def fetch_mapa_supervisores_por_vinculo():
         WHERE col."Ativo" = TRUE
         """
         df = conn.query(query)
-        
         if not df.empty:
-            # Converte matrícula para string e remove decimais se houver (ex: 12345.0 -> 12345)
             df['Matricula'] = pd.to_numeric(df['Matricula'], errors='coerce').fillna(0).astype(int).astype(str)
             df['Supervisor'] = df['Supervisor'].str.strip().str.upper()
-            
-            # Retorna dicionário { '12345': 'JOAO DA SILVA' }
             return dict(zip(df['Matricula'], df['Supervisor']))
-            
         return {}
     except Exception as e:
         st.error(f"Erro ao buscar supervisores no DB: {e}")
@@ -288,7 +281,6 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
     with st.spinner("Buscando dados..."):
         df = fetch_dias_demonstrativo(vinculo, periodo)
     if not df.empty:
-        # Tenta ordenar as colunas para melhor visualização
         cols_order = [c for c in ['DTAPURACAO', 'DSPONTODIA', 'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2'] if c in df.columns]
         other_cols = [c for c in df.columns if c not in cols_order]
         st.dataframe(df[cols_order + other_cols], use_container_width=True, hide_index=True)
@@ -299,8 +291,14 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
 # 8. FUNÇÃO AUXILIAR: FERIADOS
 # ==============================================================================
 def verificar_feriado(data_dt):
-    feriados_fixos = ["01/01", "21/04", "01/05", "07/09", "12/10", "02/11", "15/11", "25/12"]
+    # Lista de feriados nacionais fixos (dd/mm)
+    # Adicionando datas móveis principais para 2025/2026 manualmente se necessário
+    feriados_fixos = [
+        "01/01", "21/04", "01/05", "07/09", "12/10", "02/11", "15/11", "25/12",
+        "20/11" # Dia da Consciência Negra (Nacional agora)
+    ]
     dia_mes = data_dt.strftime("%d/%m")
+    
     if dia_mes in feriados_fixos:
         return True, f"Feriado ({dia_mes})"
     return False, ""
@@ -346,6 +344,21 @@ with st.sidebar:
     mes_hcm = st.text_input("Mês Comp. (HCM)", value=comp_sug)
     data_ref = st.date_input("Data Ref. Ativos", datetime.now())
     
+    # --- FILTRO DE SUPERVISOR NO SIDEBAR (ANTES DE PROCESSAR) ---
+    st.divider()
+    st.markdown("### Filtros")
+    # Busca supervisores únicos do DB (para popular o select)
+    # Como não temos a lista ainda, vamos mostrar o filtro DEPOIS da busca na próxima execução,
+    # OU podemos pré-carregar. Para performance, deixaremos o filtro dinâmico aparecer
+    # se já tivermos dados em cache, ou deixamos para filtrar no processamento.
+    
+    filtro_sup_sidebar = []
+    if st.session_state.get("busca_realizada") and "mapa_sup" in st.session_state["dados_cache"]:
+        mapa = st.session_state["dados_cache"]["mapa_sup"]
+        if mapa:
+            lista_sup = sorted(list(set(mapa.values())))
+            filtro_sup_sidebar = st.multiselect("Filtrar Supervisor:", lista_sup)
+
     st.divider()
     if st.button("🚀 Disparar Análise", use_container_width=True):
         st.session_state["busca_realizada"] = True
@@ -385,106 +398,112 @@ if st.session_state["busca_realizada"]:
                 "mapa_sup": mapa_supervisores
             }
             status.update(label="Pronto!", state="complete", expanded=False)
+            st.rerun() # Rerun para atualizar o filtro de supervisor na sidebar
 
     df_func = st.session_state["dados_cache"]["funcionarios"].copy()
     df_oco = st.session_state["dados_cache"]["ocorrencias"].copy()
     per_cache = st.session_state["dados_cache"]["periodo"]
     mapa_sup = st.session_state["dados_cache"]["mapa_sup"]
 
-    # 2. FILTRO POSTO LOCAL
-    postos = sorted(df_func['NMESTRUTGEREN'].dropna().unique().tolist())
-    f1, f2 = st.columns([3, 1])
-    with f1:
-        sel_postos = st.multiselect("🔍 Filtrar Posto:", postos, placeholder="Todos")
+    # --- APLICAÇÃO DOS MAPAS ---
+    df_func['NRVINCULOM'] = df_func['NRVINCULOM'].astype(str)
+    df_func['Supervisor'] = df_func['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
     
-    if sel_postos:
-        df_func = df_func[df_func['NMESTRUTGEREN'].isin(sel_postos)]
+    mapa_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
+    
+    # --- FILTRO DE SUPERVISOR (SE SELECIONADO NA SIDEBAR) ---
+    if filtro_sup_sidebar:
+        df_func = df_func[df_func['Supervisor'].isin(filtro_sup_sidebar)]
+        # Filtra ocorrências também pelos IDs restantes
+        ids_validos = df_func['NRVINCULOM'].astype(str).tolist()
         if not df_oco.empty:
             df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
-            ids_validos = df_func['NRVINCULOM'].astype(str).tolist()
             df_oco = df_oco[df_oco['NRVINCULOM'].isin(ids_validos)]
 
     # 3. PROCESSAMENTO
     hoje = datetime.now().strftime('%Y-%m-%d')
     
-    if df_oco.empty:
-        st.success("🎉 Nenhuma ocorrência encontrada!")
+    if df_oco.empty and df_func.empty:
+        st.warning("Nenhum dado para os filtros selecionados.")
     else:
-        # Prepara Dados
-        df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
-        df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
-        df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
-        df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
-        
-        # Mapas (Nomes e Escolas da API)
-        df_func['NRVINCULOM'] = df_func['NRVINCULOM'].astype(str)
-        map_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
-        map_esc = dict(zip(df_func['NRVINCULOM'], df_func['NMESTRUTGEREN']))
-        
-        df_oco['Funcionario'] = df_oco['NRVINCULOM'].map(map_nome).fillna(df_oco['NMVINCULOM'])
-        df_oco['Escola'] = df_oco['NRVINCULOM'].map(map_esc).fillna(df_oco['NMESTRUTGEREN'])
-        
-        # --- MAPA DE SUPERVISOR VIA DB (ID DO FUNCIONÁRIO) ---
-        df_oco['Supervisor'] = df_oco['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
+        if not df_oco.empty:
+            # Prepara Dados
+            df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
+            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
+            df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
+            df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
+            
+            df_oco['Funcionario'] = df_oco['NRVINCULOM'].map(mapa_nome).fillna(df_oco['NMVINCULOM'])
+            df_oco['Supervisor'] = df_oco['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
 
-        # --- FILTRO 1: REMOVE HOJE ---
-        df_oco = df_oco[df_oco['DATA_INICIO_FILTER'] != hoje].copy()
+            # --- FILTRO 1: REMOVE HOJE ---
+            df_oco = df_oco[df_oco['DATA_INICIO_FILTER'] != hoje].copy()
 
-        # --- FILTRO 2: REMOVE FIM DE SEMANA E IDENTIFICA FERIADOS ---
-        df_oco['DT_OBJ'] = pd.to_datetime(df_oco['DATA_INICIO_FILTER'], errors='coerce')
-        df_oco['DIA_SEMANA'] = df_oco['DT_OBJ'].dt.dayofweek 
-        df_oco['IS_FERIADO'] = df_oco['DT_OBJ'].apply(lambda x: verificar_feriado(x)[0] if pd.notnull(x) else False)
-        
-        # Separa Faltas Válidas (Seg-Sex)
-        df_faltas_uteis = df_oco[
-            (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
-            (df_oco['DIA_SEMANA'] < 5) &
-            (df_oco['IS_FERIADO'] == False)
-        ].copy()
-        
-        df_faltas_feriado = df_oco[
-            (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
-            (df_oco['IS_FERIADO'] == True)
-        ].copy()
+            # --- FILTRO 2: REMOVE FIM DE SEMANA E IDENTIFICA FERIADOS ---
+            df_oco['DT_OBJ'] = pd.to_datetime(df_oco['DATA_INICIO_FILTER'], errors='coerce')
+            df_oco['DIA_SEMANA'] = df_oco['DT_OBJ'].dt.dayofweek 
+            df_oco['IS_FERIADO'] = df_oco['DT_OBJ'].apply(lambda x: verificar_feriado(x)[0] if pd.notnull(x) else False)
+            
+            # Separa Faltas Válidas (Seg-Sex, Não Feriado)
+            df_faltas_uteis = df_oco[
+                (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
+                (df_oco['DIA_SEMANA'] < 5) &
+                (df_oco['IS_FERIADO'] == False)
+            ].copy()
+            
+            df_faltas_feriado = df_oco[
+                (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
+                (df_oco['IS_FERIADO'] == True)
+            ].copy()
 
-        # DF ATRASOS (Conta tudo)
-        df_atrasos_all = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
+            # DF ATRASOS (Conta tudo)
+            df_atrasos_all = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
 
-        # --- AGREGAÇÕES SEPARADAS ---
-        s_faltas = df_faltas_uteis.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
-        s_atrasos = df_atrasos_all.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
-        s_datas = df_oco.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
+            # --- AGREGAÇÕES SEPARADAS ---
+            s_faltas = df_faltas_uteis.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+            s_atrasos = df_atrasos_all.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
+            s_datas = df_oco.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
 
-        # JOIN FINAL
-        # Base com Supervisor correto
-        df_base = df_oco[['NRVINCULOM', 'Funcionario', 'Escola', 'Supervisor']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
-        
-        resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
-        resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
-        resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
+            # JOIN FINAL
+            df_base = df_oco[['NRVINCULOM', 'Funcionario', 'Supervisor']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
+            
+            resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
+            resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
+            resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
+        else:
+            resumo = pd.DataFrame(columns=['NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Total_Horas_Atraso', 'Datas'])
 
         # SEM OCORRÊNCIAS
-        ids_prob = set(resumo['NRVINCULOM'].unique())
+        ids_prob = set(resumo['NRVINCULOM'].unique()) if not resumo.empty else set()
         df_sem = df_func[~df_func['NRVINCULOM'].isin(ids_prob)].copy()
-        # Mapeia supervisor no DF de sem ocorrências também
-        df_sem['Supervisor'] = df_sem['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
-        df_sem = df_sem[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN', 'Supervisor']].rename(columns={'NMVINCULOM':'Funcionario', 'NMESTRUTGEREN':'Escola'})
+        df_sem = df_sem[['NRVINCULOM', 'NMVINCULOM', 'Supervisor']].rename(columns={'NMVINCULOM':'Funcionario'})
 
         # KPIs
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Analisado", len(df_func))
         c2.metric("✅ Ponto Excelente", len(df_sem), delta_color="normal")
-        c3.metric("Faltas (Dias Úteis)", resumo['Qtd_Faltas'].sum(), delta_color="inverse")
-        c4.metric("Faltas em Feriados", len(df_faltas_feriado), delta_color="inverse")
+        c3.metric("Com Ocorrências", len(resumo), delta_color="inverse")
+        
+        total_faltas = resumo['Qtd_Faltas'].sum() if not resumo.empty else 0
+        c4.metric("Faltas (Dias Úteis)", total_faltas, delta_color="inverse")
 
         st.divider()
         
         # ==================== GRÁFICO ====================
         st.subheader("📊 Visão por Supervisor")
         grp_excelente = df_sem.groupby('Supervisor').size().reset_index(name='Ponto Excelente')
-        grp_problema = resumo.groupby('Supervisor').size().reset_index(name='Com Ocorrências')
-        df_chart = pd.merge(grp_excelente, grp_problema, on='Supervisor', how='outer').fillna(0)
         
+        if not resumo.empty:
+            grp_problema = resumo.groupby('Supervisor').size().reset_index(name='Com Ocorrências')
+            df_chart = pd.merge(grp_excelente, grp_problema, on='Supervisor', how='outer').fillna(0)
+        else:
+            df_chart = grp_excelente
+            df_chart['Com Ocorrências'] = 0
+
+        # Filtra o gráfico se houver seleção de supervisor na sidebar (já filtrado nos dados, mas garante visual limpo)
+        if filtro_sup_sidebar:
+            df_chart = df_chart[df_chart['Supervisor'].isin(filtro_sup_sidebar)]
+
         fig = px.bar(
             df_chart, x='Supervisor', y=['Ponto Excelente', 'Com Ocorrências'],
             barmode='group', color_discrete_map={'Ponto Excelente': '#28a745', 'Com Ocorrências': '#dc3545'},
@@ -501,30 +520,34 @@ if st.session_state["busca_realizada"]:
         func_abrir = None
         
         with t1:
-            st.caption("Considerando apenas dias úteis (Seg-Sex).")
-            df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
-            ev = st.dataframe(df_show[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola', 'Qtd_Faltas', 'Datas']], use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t1")
-            if ev.selection.rows: func_abrir = df_show.iloc[ev.selection.rows[0]]
+            st.caption("Considerando apenas dias úteis (Seg-Sex). Exclui feriados.")
+            if not resumo.empty:
+                df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+                ev = st.dataframe(df_show[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Datas']], use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t1", column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias", format="%d ❌")})
+                if ev.selection.rows: func_abrir = df_show.iloc[ev.selection.rows[0]]
+            else: st.info("Sem faltas em dias úteis.")
 
         with t2:
-            df_show2 = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
-            ev2 = st.dataframe(df_show2[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']], use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t2")
-            if ev2.selection.rows: func_abrir = df_show2.iloc[ev2.selection.rows[0]]
+            if not resumo.empty:
+                df_show2 = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+                ev2 = st.dataframe(df_show2[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Tempo_Atraso_Fmt', 'Datas']], use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t2", column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")})
+                if ev2.selection.rows: func_abrir = df_show2.iloc[ev2.selection.rows[0]]
+            else: st.info("Sem atrasos.")
 
         with t3:
-            if not df_faltas_feriado.empty:
+            if not df_ocorrencias.empty and not df_faltas_feriado.empty:
                 df_faltas_feriado['Supervisor'] = df_faltas_feriado['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
-                df_fer_show = df_faltas_feriado[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola', 'DATA_INICIO']].drop_duplicates()
+                df_fer_show = df_faltas_feriado[['NRVINCULOM', 'Funcionario', 'Supervisor', 'DATA_INICIO']].drop_duplicates()
                 st.dataframe(df_fer_show, use_container_width=True, hide_index=True)
             else: st.success("Ninguém faltou em feriados!")
 
         with t4:
-            st.dataframe(df_sem[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola']], use_container_width=True, hide_index=True)
+            st.dataframe(df_sem[['NRVINCULOM', 'Funcionario', 'Supervisor']], use_container_width=True, hide_index=True)
 
         with t5:
             st.dataframe(resumo, use_container_width=True, hide_index=True)
             csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-            st.download_button("📥 Baixar CSV", csv, f"relatorio_{per_cache}.csv", "text/csv")
+            st.download_button("📥 Baixar CSV Consolidado", csv, f"relatorio_{per_cache}.csv", "text/csv")
 
         if func_abrir is not None:
             mostrar_espelho_modal(func_abrir['Funcionario'], func_abrir['NRVINCULOM'], per_cache)
