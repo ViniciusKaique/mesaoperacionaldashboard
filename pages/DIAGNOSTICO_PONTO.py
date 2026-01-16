@@ -4,20 +4,21 @@ import pandas as pd
 import pytz
 from datetime import datetime
 from sqlalchemy import text
+import plotly.express as px  # Added for charts
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO DA PÁGINA
+# 1. PAGE CONFIGURATION
 # ==============================================================================
-st.set_page_config(page_title="HCM - Ocorrências (Turbo)", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="HCM - Occurrences (Turbo)", layout="wide", page_icon="⚡")
 
 # ==============================================================================
-# 2. SEGURANÇA E CREDENCIAIS
+# 2. SECURITY AND CREDENTIALS
 # ==============================================================================
 if not st.session_state.get("authentication_status"):
-    st.warning("🔒 Acesso restrito. Faça login na página inicial.")
+    st.warning("🔒 Restricted access. Please log in on the home page.")
     st.stop()
 
-# --- CARREGAR CREDENCIAIS ---
+# --- HCM CREDENTIALS ---
 try:
     SECRETS_HCM = st.secrets["hcm_api"]
     HCM_USER = SECRETS_HCM["usuario"]
@@ -25,17 +26,51 @@ try:
     HCM_HASH = SECRETS_HCM["hash_sessao"]
     HCM_UID_BROWSER = SECRETS_HCM["user_id_browser"]
     HCM_PROJECT = SECRETS_HCM.get("project_id", "750")
+except Exception as e:
+    st.error(f"⚠️ HCM Config Error: {e}")
+    st.stop()
 
+# --- PORTAL GESTOR CREDENTIALS ---
+try:
     SECRETS_PG = st.secrets["api_portal_gestor"]
     PG_TOKEN = SECRETS_PG["token_fixo"]
     PG_CD_OPERADOR = SECRETS_PG["cd_operador"]
     PG_NR_ORG = SECRETS_PG["nr_org"]
 except Exception as e:
-    st.error(f"⚠️ Erro ao carregar secrets.toml: {e}")
+    st.error(f"⚠️ Portal Gestor Config Error: {e}")
     st.stop()
 
 # ==============================================================================
-# 3. GESTÃO DE SESSÃO E BANCO DE DADOS
+# 3. DATABASE (SUPERVISORS MAPPING)
+# ==============================================================================
+@st.cache_data(ttl=600)
+def fetch_dados_auxiliares_db():
+    """Fetches School -> Supervisor relationship from DB"""
+    try:
+        conn = st.connection("postgres", type="sql")
+        
+        # Relation School -> Supervisor
+        q_unidades = """
+        SELECT u."NomeUnidade" as "Escola", s."NomeSupervisor" as "Supervisor"
+        FROM "Unidades" u
+        JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
+        """
+        df_unidades = conn.query(q_unidades)
+        
+        # Create dictionary {School Name: Supervisor Name}
+        # Normalizing to uppercase to ensure matching
+        if not df_unidades.empty:
+            df_unidades['Escola'] = df_unidades['Escola'].str.strip().str.upper()
+            df_unidades['Supervisor'] = df_unidades['Supervisor'].str.strip().str.upper()
+            return dict(zip(df_unidades['Escola'], df_unidades['Supervisor']))
+            
+        return {}
+    except Exception as e:
+        st.error(f"DB Error: {e}")
+        return {}
+
+# ==============================================================================
+# 4. HCM SESSION MANAGEMENT
 # ==============================================================================
 def get_data_brasil():
     return datetime.now(pytz.timezone('America/Sao_Paulo'))
@@ -122,40 +157,28 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. API PORTAL GESTOR (NOVAS FUNÇÕES ADICIONADAS)
+# 5. API PORTAL GESTOR
 # ==============================================================================
-
 @st.cache_data(ttl=3600)
 def fetch_estruturas_gestor():
-    """Busca a lista de Estruturas/Tomadores disponíveis"""
     url = "https://portalgestor.teknisa.com/backend/index.php/getEstruturasGerenciais"
-    params = {
-        "requestType": "FilterData",
-        "NRORG": PG_NR_ORG,
-        "CDOPERADOR": PG_CD_OPERADOR
-    }
-    headers = {
-        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
-        "User-Agent": "Mozilla/5.0"
-    }
+    params = { "requestType": "FilterData", "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR }
+    headers = { "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG, "User-Agent": "Mozilla/5.0" }
     try:
         r = requests.get(url, params=params, headers=headers, timeout=15)
         if r.status_code == 200:
             data = r.json()
             items = (data.get("dataset", {}) or {}).get("data", [])
-            # Retorna lista de tuplas (Nome, ID)
             return [(i.get("NMESTRUTURA", "Sem Nome"), i.get("NRESTRUTURAM")) for i in items]
-    except Exception as e:
-        st.error(f"Erro ao buscar estruturas: {e}")
+    except: pass
     return []
 
 def fetch_ids_portal_gestor(data_ref, codigo_estrutura):
-    """Agora aceita o código da estrutura dinamicamente"""
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
     params = {
         "requestType": "FilterData",
         "DIA": data_ref.strftime("%d/%m/%Y"),
-        "NRESTRUTURAM": codigo_estrutura, # <-- ID Dinâmico
+        "NRESTRUTURAM": codigo_estrutura,
         "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
     }
     headers = {
@@ -190,7 +213,7 @@ def fetch_periodos_apuracao():
     return pd.DataFrame()
 
 # ==============================================================================
-# 5. API HCM - OCORRÊNCIAS
+# 6. API HCM - OCORRÊNCIAS
 # ==============================================================================
 def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competencia):
     url = "https://hcm.teknisa.com/backend/index.php/getMarcacaoPontoOcorrencias"
@@ -231,309 +254,273 @@ def decimal_para_hora(val):
     except: return "00:00"
 
 # ==============================================================================
-# 6. API HCM - DETALHES DO PONTO (ESPELHO)
+# 7. API HCM - DETALHES (MODAL)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def fetch_dias_demonstrativo(vinculo, periodo):
     url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
-    vinculo_limpo = str(vinculo).replace('.0', '').strip()
     params = {
         "requestType": "FilterData",
-        "NRVINCULOM": vinculo_limpo,
+        "NRVINCULOM": str(vinculo).split('.')[0],
         "NRPERIODOAPURACAO": periodo,
-        "NRORG": PG_NR_ORG,
-        "CDOPERADOR": PG_CD_OPERADOR
+        "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
     }
-    headers = {
-        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
-        "User-Agent": "Mozilla/5.0"
-    }
+    headers = { "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG }
     try:
         r = requests.get(url, params=params, headers=headers, timeout=15)
         if r.status_code == 200:
-            data = r.json()
-            dataset = data.get("dataset", {})
-            items = dataset.get("data") or dataset.get("getDiasDemonstrativo") or []
-            if items:
-                df = pd.DataFrame(items)
-                df.columns = df.columns.str.upper().str.strip()
-                return df
+            items = r.json().get("dataset", {}).get("data", [])
+            return pd.DataFrame(items)
     except: pass
     return pd.DataFrame()
 
-# ==============================================================================
-# 7. INTERFACE E MODAL
-# ==============================================================================
-
-@st.dialog("📅 Espelho de Ponto (Detalhado)", width="large")
+@st.dialog("📅 Espelho de Ponto", width="large")
 def mostrar_espelho_modal(nome, vinculo, periodo):
-    st.write(f"**Funcionário:** {nome}")
-    st.caption(f"Matrícula: {vinculo} | Período ID: {periodo}")
-    
-    with st.spinner("Buscando dados no sistema..."):
-        df_espelho = fetch_dias_demonstrativo(vinculo, periodo)
-    
-    if not df_espelho.empty:
-        cols_preferidas = [
-            'DTAPURACAO', 'DSPONTODIA', 
-            'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2', 'ENTRADA_SAIDA_3', 
-            'QTHORASREALIZADAS', 'QTHORASFALTAS'
-        ]
-        cols_existentes = [c for c in cols_preferidas if c in df_espelho.columns]
-        cols_final = cols_existentes if cols_existentes else df_espelho.columns.tolist()
-
-        st.dataframe(
-            df_espelho[cols_final],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "DTAPURACAO": st.column_config.TextColumn("Data"),
-                "DSPONTODIA": st.column_config.TextColumn("Situação", width="medium"),
-                "QTHORASFALTAS": st.column_config.NumberColumn("Faltas (h)", format="%.2f"),
-                "QTHORASREALIZADAS": st.column_config.NumberColumn("Trab (h)", format="%.2f")
-            }
-        )
+    st.write(f"**{nome}** (Matrícula: {vinculo})")
+    with st.spinner("Buscando dados..."):
+        df = fetch_dias_demonstrativo(vinculo, periodo)
+    if not df.empty:
+        # Tenta ordenar as colunas para melhor visualização
+        cols_order = [c for c in ['DTAPURACAO', 'DSPONTODIA', 'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2'] if c in df.columns]
+        other_cols = [c for c in df.columns if c not in cols_order]
+        st.dataframe(df[cols_order + other_cols], use_container_width=True, hide_index=True)
     else:
-        st.warning("📭 Nenhum dado encontrado para este período.")
-        st.info("💡 **Dica:** Verifique se o período selecionado no menu lateral corresponde às datas das faltas.")
+        st.warning("Sem dados detalhados.")
 
 # ==============================================================================
-# 8. LÓGICA PRINCIPAL DA PÁGINA
+# 8. LÓGICA PRINCIPAL
 # ==============================================================================
 
 st.title("⚡ Relatório Turbo - Faltas e Atrasos (HCM)")
-st.markdown("**Modo Otimizado:** Ignora ocorrências do dia vigente.")
+st.markdown("**Modo Otimizado:** Ignora dia vigente, desconta fins de semana e destaca feriados.")
 
-# --- ESTADO PERSISTENTE ---
-if "busca_realizada" not in st.session_state:
-    st.session_state["busca_realizada"] = False
-if "dados_cache" not in st.session_state:
-    st.session_state["dados_cache"] = {}
+# --- ESTADO ---
+if "busca_realizada" not in st.session_state: st.session_state["busca_realizada"] = False
+if "dados_cache" not in st.session_state: st.session_state["dados_cache"] = {}
 
 with st.sidebar:
     st.header("Parâmetros")
-
-    # --- NOVO: SELETOR DE ESTRUTURA/TOMADOR ---
-    estruturas_opcoes = fetch_estruturas_gestor()
-    if estruturas_opcoes:
-        est_selecionada = st.selectbox(
-            "🏢 Tomador (Estrutura):",
-            options=estruturas_opcoes,
-            format_func=lambda x: x[0]
-        )
-        # Pega o ID (ex: 101091998)
-        estrutura_id = est_selecionada[1]
-    else:
-        # Fallback caso a API de estruturas falhe
-        estrutura_id = st.text_input("Estrutura ID (NRESTRUTURAM)", value="101091998")
-
+    
+    # ESTRUTURA
+    est_opcoes = fetch_estruturas_gestor()
+    est_id = "101091998"
+    if est_opcoes:
+        sel = st.selectbox("🏢 Tomador:", options=est_opcoes, format_func=lambda x: x[0])
+        est_id = sel[1]
+    
     st.divider()
     
-    df_periodos = fetch_periodos_apuracao()
-    periodo_apuracao = "1904"
-    competencia_sugerida = datetime.now().replace(day=1).strftime("%d/%m/%Y")
+    # PERIODO
+    df_per = fetch_periodos_apuracao()
+    per_id = "1904"
+    comp_sug = datetime.now().replace(day=1).strftime("%d/%m/%Y")
     
-    if not df_periodos.empty:
-        opcao = st.selectbox("Selecione o Período:", df_periodos['DSPERIODOAPURACAO'])
-        row_sel = df_periodos[df_periodos['DSPERIODOAPURACAO'] == opcao].iloc[0]
-        periodo_apuracao = row_sel['NRPERIODOAPURACAO']
+    if not df_per.empty:
+        opcao = st.selectbox("Período:", df_per['DSPERIODOAPURACAO'])
+        row = df_per[df_per['DSPERIODOAPURACAO'] == opcao].iloc[0]
+        per_id = row['NRPERIODOAPURACAO']
         try:
-            dt_ini = datetime.strptime(row_sel['DTINICIALAPURACAO'], "%d/%m/%Y")
-            competencia_sugerida = dt_ini.replace(day=1).strftime("%d/%m/%Y")
+            comp_sug = datetime.strptime(row['DTINICIALAPURACAO'], "%d/%m/%Y").replace(day=1).strftime("%d/%m/%Y")
         except: pass
     else:
-        periodo_apuracao = st.text_input("Período Apuração (Cód)", value="1904")
+        per_id = st.text_input("Cód. Período", value="1904")
 
-    mes_competencia = st.text_input("Mês Competência (HCM)", value=competencia_sugerida)
-    data_ref = st.date_input("Data Ref. (Para Lista de Ativos)", datetime.now())
+    mes_hcm = st.text_input("Mês Comp. (HCM)", value=comp_sug)
+    data_ref = st.date_input("Data Ref. Ativos", datetime.now())
     
-    # --- NOVO: FILTRO DE POSTOS (Placeholder que será preenchido após busca) ---
-    st.markdown("---")
-    st.caption("Filtros adicionais aparecerão após a busca.")
-    
+    st.divider()
     if st.button("🚀 Disparar Análise", use_container_width=True):
         st.session_state["busca_realizada"] = True
         st.session_state["dados_cache"] = {} 
         st.rerun()
 
-# --- EXECUÇÃO (SE ATIVA) ---
+# --- EXECUÇÃO ---
 if st.session_state["busca_realizada"]:
     
-    # 1. BUSCA DADOS (SE NECESSÁRIO)
+    # 1. BUSCA (CACHE)
     if not st.session_state["dados_cache"]:
-        with st.status("🔄 Analisando...", expanded=True) as status:
-            status.write(f"Buscando funcionários ativos na estrutura {estrutura_id}...")
+        with st.status("🔄 Buscando dados...", expanded=True) as status:
+            df_func = fetch_ids_portal_gestor(data_ref, est_id)
+            if df_func.empty:
+                status.update(label="❌ Sem funcionários.", state="error")
+                st.session_state["busca_realizada"] = False; st.stop()
             
-            # Passa a estrutura selecionada
-            df_funcionarios = fetch_ids_portal_gestor(data_ref, estrutura_id)
+            # Mapas de Supervisor (DB)
+            mapa_supervisores = fetch_dados_auxiliares_db() # Dictionary {Escola: Supervisor}
             
-            if df_funcionarios.empty:
-                status.update(label="❌ Lista vazia ou erro na estrutura.", state="error")
-                st.session_state["busca_realizada"] = False
-                st.stop()
+            if 'NMESTRUTGEREN' not in df_func.columns: df_func['NMESTRUTGEREN'] = "GERAL"
             
-            # Garante que temos a coluna de Posto/Escola
-            if 'NMESTRUTGEREN' not in df_funcionarios.columns:
-                df_funcionarios['NMESTRUTGEREN'] = "GERAL"
-
-            lista_ids = df_funcionarios['NRVINCULOM'].dropna().astype(int).unique().tolist()
-            
-            status.write(f"Consultando ocorrências para {len(lista_ids)} vínculos...")
-            token_hcm = obter_sessao_hcm()
-            if not token_hcm:
-                status.update(label="❌ Falha login HCM.", state="error")
-                st.session_state["busca_realizada"] = False
-                st.stop()
+            lista_ids = df_func['NRVINCULOM'].dropna().astype(int).unique().tolist()
+            token = obter_sessao_hcm()
+            if not token:
+                status.update(label="❌ Erro Login HCM.", state="error")
+                st.session_state["busca_realizada"] = False; st.stop()
                 
-            df_ocorrencias = fetch_ocorrencias_hcm_turbo(token_hcm, lista_ids, periodo_apuracao, mes_competencia)
+            df_oco = fetch_ocorrencias_hcm_turbo(token, lista_ids, per_id, mes_hcm)
             
             st.session_state["dados_cache"] = {
-                "funcionarios": df_funcionarios,
-                "ocorrencias": df_ocorrencias,
-                "periodo_apuracao": periodo_apuracao
+                "funcionarios": df_func, "ocorrencias": df_oco, "periodo": per_id, "mapa_sup": mapa_supervisores
             }
-            status.update(label="Sucesso!", state="complete", expanded=False)
+            status.update(label="Pronto!", state="complete", expanded=False)
 
-    # 2. RECUPERA DO CACHE
-    df_funcionarios = st.session_state["dados_cache"]["funcionarios"].copy()
-    df_ocorrencias = st.session_state["dados_cache"]["ocorrencias"].copy()
-    periodo_apuracao_cache = st.session_state["dados_cache"]["periodo_apuracao"]
+    df_func = st.session_state["dados_cache"]["funcionarios"].copy()
+    df_oco = st.session_state["dados_cache"]["ocorrencias"].copy()
+    per_cache = st.session_state["dados_cache"]["periodo"]
+    mapa_sup = st.session_state["dados_cache"]["mapa_sup"]
 
-    # --- 3. FILTRO DE POSTO (LOCAL) ---
-    # Mostra um multiselect logo acima dos dados para filtrar por Posto/Escola
-    postos_disponiveis = sorted(df_funcionarios['NMESTRUTGEREN'].dropna().unique().tolist())
-    
-    # Usamos columns para não ocupar a tela toda
+    # 2. FILTRO POSTO LOCAL
+    postos = sorted(df_func['NMESTRUTGEREN'].dropna().unique().tolist())
     f1, f2 = st.columns([3, 1])
     with f1:
-        postos_selecionados = st.multiselect("🔍 Filtrar por Posto/Escola:", postos_disponiveis, placeholder="Todos os postos")
+        sel_postos = st.multiselect("🔍 Filtrar Posto:", postos, placeholder="Todos")
     
-    # Aplica filtro se houver seleção
-    if postos_selecionados:
-        df_funcionarios = df_funcionarios[df_funcionarios['NMESTRUTGEREN'].isin(postos_selecionados)]
-        # Se filtrou os funcionários, precisamos garantir que as ocorrências também respeitem esses IDs
-        ids_filtrados = df_funcionarios['NRVINCULOM'].astype(str).tolist()
-        if not df_ocorrencias.empty:
-            df_ocorrencias['NRVINCULOM'] = df_ocorrencias['NRVINCULOM'].astype(str)
-            df_ocorrencias = df_ocorrencias[df_ocorrencias['NRVINCULOM'].isin(ids_filtrados)]
+    if sel_postos:
+        df_func = df_func[df_func['NMESTRUTGEREN'].isin(sel_postos)]
+        if not df_oco.empty:
+            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
+            ids_validos = df_func['NRVINCULOM'].astype(str).tolist()
+            df_oco = df_oco[df_oco['NRVINCULOM'].isin(ids_validos)]
 
-    # Prepara Mapas
-    df_funcionarios['NRVINCULOM'] = df_funcionarios['NRVINCULOM'].astype(str)
-    mapa_nomes = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMVINCULOM']))
-    mapa_escolas = dict(zip(df_funcionarios['NRVINCULOM'], df_funcionarios['NMESTRUTGEREN']))
-
-    # 4. PROCESSAMENTO FINAL
-    hoje_str = datetime.now().strftime('%Y-%m-%d')
-    ocorrencias_filtradas = pd.DataFrame()
+    # 3. PROCESSAMENTO
+    hoje = datetime.now().strftime('%Y-%m-%d')
     
-    if not df_ocorrencias.empty:
-        df_ocorrencias['DATA_INICIO_FILTER'] = df_ocorrencias['DATA_INICIO_FILTER'].astype(str)
-        df_ocorrencias['TIPO_OCORRENCIA'] = df_ocorrencias['TIPO_OCORRENCIA'].str.strip().str.upper()
-        
-        qtd_antes = len(df_ocorrencias)
-        ocorrencias_filtradas = df_ocorrencias[df_ocorrencias['DATA_INICIO_FILTER'] != hoje_str].copy()
-        
-        if qtd_antes > len(ocorrencias_filtradas):
-            st.toast(f"ℹ️ Ocorrências de hoje ({hoje_str}) foram ignoradas.")
-    
-    if ocorrencias_filtradas.empty:
-        st.success("🎉 Nenhuma falta ou atraso encontrado para os filtros selecionados (exceto hoje)!")
+    if df_oco.empty:
+        st.success("🎉 Nenhuma ocorrência encontrada!")
     else:
-        ocorrencias_filtradas['DIFF_HOURS'] = pd.to_numeric(ocorrencias_filtradas['DIFF_HOURS'], errors='coerce').fillna(0)
-        ocorrencias_filtradas['NRVINCULOM'] = ocorrencias_filtradas['NRVINCULOM'].astype(str)
-        ocorrencias_filtradas['Funcionario'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_nomes).fillna(ocorrencias_filtradas['NMVINCULOM'])
-        ocorrencias_filtradas['Escola'] = ocorrencias_filtradas['NRVINCULOM'].map(mapa_escolas).fillna(ocorrencias_filtradas['NMESTRUTGEREN'])
+        # Prepara Dados
+        df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
+        df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
+        df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
+        df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
         
-        df_only_faltas = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'FALTA'].copy()
-        s_faltas = df_only_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+        # Mapas
+        df_func['NRVINCULOM'] = df_func['NRVINCULOM'].astype(str)
+        map_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
+        map_esc = dict(zip(df_func['NRVINCULOM'], df_func['NMESTRUTGEREN']))
         
-        df_only_atrasos = ocorrencias_filtradas[ocorrencias_filtradas['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
-        s_atrasos = df_only_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
+        df_oco['Funcionario'] = df_oco['NRVINCULOM'].map(map_nome).fillna(df_oco['NMVINCULOM'])
+        df_oco['Escola'] = df_oco['NRVINCULOM'].map(map_esc).fillna(df_oco['NMESTRUTGEREN'])
         
-        s_datas = ocorrencias_filtradas.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
+        # Mapeamento do Supervisor
+        # Normaliza chaves para garantir match
+        df_oco['Escola_Upper'] = df_oco['Escola'].str.strip().str.upper()
+        df_oco['Supervisor'] = df_oco['Escola_Upper'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
+
+        # --- FILTRO 1: REMOVE HOJE ---
+        df_oco = df_oco[df_oco['DATA_INICIO_FILTER'] != hoje].copy()
+
+        # --- FILTRO 2: REMOVE FIM DE SEMANA (PARA FALTAS) ---
+        df_oco['DT_OBJ'] = pd.to_datetime(df_oco['DATA_INICIO_FILTER'], errors='coerce')
+        df_oco['DIA_SEMANA'] = df_oco['DT_OBJ'].dt.dayofweek # 0=Seg, 5=Sab, 6=Dom
         
-        df_base = ocorrencias_filtradas[['NRVINCULOM', 'Funcionario', 'Escola']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
+        # Separa Faltas Válidas (Seg-Sex)
+        df_faltas_uteis = df_oco[
+            (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
+            (df_oco['DIA_SEMANA'] < 5)
+        ].copy()
+        
+        # DF ATRASOS (Conta tudo)
+        df_atrasos_all = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
+
+        # --- AGREGAÇÕES ---
+        
+        # 1. FALTAS ÚTEIS (Dedup por dia)
+        s_faltas = df_faltas_uteis.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+        
+        # 2. ATRASOS (Soma horas)
+        s_atrasos = df_atrasos_all.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
+        
+        # 3. DATAS (Visual)
+        s_datas = df_oco.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
+
+        # JOIN FINAL
+        # Note: Agora incluimos Supervisor no agrupamento base
+        df_base = df_oco[['NRVINCULOM', 'Funcionario', 'Escola', 'Supervisor']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
         resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
         
         resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
         resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-        ids_com_problema = set(resumo['NRVINCULOM'].unique())
-        df_sem = df_funcionarios[~df_funcionarios['NRVINCULOM'].isin(ids_com_problema)].copy()
-        df_sem = df_sem.rename(columns={'NMVINCULOM': 'Funcionario', 'NMESTRUTGEREN': 'Escola'})
-
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Total Analisado", len(df_funcionarios))
-        k2.metric("✅ Ponto Excelente", len(df_sem), delta_color="normal")
-        k3.metric("Com Ocorrências", len(resumo), delta_color="inverse")
-        k4.metric("Faltas Totais", resumo['Qtd_Faltas'].sum())
+        # SEM OCORRÊNCIAS
+        ids_prob = set(resumo['NRVINCULOM'].unique())
         
+        # Prepara o DF de Sem Ocorrencias com Supervisor também
+        df_sem = df_func[~df_func['NRVINCULOM'].isin(ids_prob)].copy()
+        df_sem['Escola_Upper'] = df_sem['NMESTRUTGEREN'].str.strip().str.upper()
+        df_sem['Supervisor'] = df_sem['Escola_Upper'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
+        df_sem = df_sem[['NRVINCULOM', 'NMVINCULOM', 'NMESTRUTGEREN', 'Supervisor']].rename(columns={'NMVINCULOM':'Funcionario', 'NMESTRUTGEREN':'Escola'})
+
+        # KPIs
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Analisado", len(df_func))
+        c2.metric("✅ Ponto Excelente", len(df_sem), delta_color="normal")
+        c3.metric("Com Ocorrências", len(resumo), delta_color="inverse")
+        c4.metric("Faltas (Dias Úteis)", resumo['Qtd_Faltas'].sum(), delta_color="inverse")
+
         st.divider()
-        st.info("💡 **Dica:** Clique na linha das tabelas para abrir o Espelho de Ponto detalhado.")
-
-        tab1, tab2, tab3, tab4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
         
-        func_para_abrir = None
+        # ==================== GRÁFICO POR SUPERVISOR ====================
+        st.subheader("📊 Visão por Supervisor")
         
-        # --- TAB 1: FALTAS ---
-        with tab1:
-            if not resumo.empty:
-                df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
-                event1 = st.dataframe(
-                    df_show[['NRVINCULOM', 'Funcionario', 'Escola', 'Qtd_Faltas', 'Datas']],
-                    use_container_width=True, hide_index=True,
-                    selection_mode="single-row", on_select="rerun", key="grid_faltas",
-                    column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias Falta", format="%d ❌")}
-                )
-                if event1.selection.rows:
-                    idx = event1.selection.rows[0]
-                    func_para_abrir = df_show.iloc[idx]
-            else: st.info("Sem faltas.")
-            
-        # --- TAB 2: ATRASOS ---
-        with tab2:
-            if not resumo.empty:
-                df_show2 = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
-                event2 = st.dataframe(
-                    df_show2[['NRVINCULOM', 'Funcionario', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']],
-                    use_container_width=True, hide_index=True,
-                    selection_mode="single-row", on_select="rerun", key="grid_atrasos",
-                    column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
-                )
-                if event2.selection.rows:
-                    idx = event2.selection.rows[0]
-                    func_para_abrir = df_show2.iloc[idx]
-            else: st.info("Sem atrasos.")
+        # Prepara dados para o gráfico
+        # Agrupa Ponto Excelente por Supervisor
+        grp_excelente = df_sem.groupby('Supervisor').size().reset_index(name='Ponto Excelente')
+        
+        # Agrupa Com Ocorrencias por Supervisor
+        grp_problema = resumo.groupby('Supervisor').size().reset_index(name='Com Ocorrências')
+        
+        # Merge para plotagem
+        df_chart = pd.merge(grp_excelente, grp_problema, on='Supervisor', how='outer').fillna(0)
+        
+        # Plotly Graph
+        fig = px.bar(
+            df_chart, 
+            x='Supervisor', 
+            y=['Ponto Excelente', 'Com Ocorrências'],
+            barmode='group',
+            color_discrete_map={'Ponto Excelente': '#28a745', 'Com Ocorrências': '#dc3545'},
+            text_auto=True
+        )
+        fig.update_layout(yaxis_title="Qtd. Funcionários", xaxis_title=None, legend_title=None)
+        st.plotly_chart(fig, use_container_width=True)
+        # =================================================================
+        
+        st.markdown("---")
 
-        # --- TAB 3: PONTO EXCELENTE ---
-        with tab3:
-            event3 = st.dataframe(
-                df_sem[['NRVINCULOM', 'Funcionario', 'Escola']], 
-                use_container_width=True, hide_index=True,
-                selection_mode="single-row", on_select="rerun", key="grid_excelente"
+        # ABAS
+        t1, t2, t3, t4 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "✅ Ponto Excelente", "📋 Base Completa"])
+        
+        func_abrir = None
+        
+        with t1:
+            st.caption("Considerando apenas dias úteis (Seg-Sex).")
+            # Agora exibe Supervisor
+            df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
+            ev = st.dataframe(
+                df_show[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola', 'Qtd_Faltas', 'Datas']], 
+                use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t1",
+                column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias", format="%d ❌")}
             )
-            if event3.selection.rows:
-                idx = event3.selection.rows[0]
-                func_para_abrir = df_sem.iloc[idx]
+            if ev.selection.rows: func_abrir = df_show.iloc[ev.selection.rows[0]]
 
-        # --- TAB 4: GERAL ---
-        with tab4:
-            if not resumo.empty:
-                event4 = st.dataframe(
-                    resumo, use_container_width=True, hide_index=True,
-                    selection_mode="single-row", on_select="rerun", key="grid_geral"
-                )
-                if event4.selection.rows:
-                    idx = event4.selection.rows[0]
-                    func_para_abrir = resumo.iloc[idx]
-                
-                csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-                st.download_button("📥 Baixar CSV", csv, "relatorio.csv", "text/csv")
-
-        # --- CHAMADA CENTRALIZADA DO MODAL ---
-        if func_para_abrir is not None:
-            mostrar_espelho_modal(
-                func_para_abrir['Funcionario'], 
-                func_para_abrir['NRVINCULOM'], 
-                periodo_apuracao_cache
+        with t2:
+            # Agora exibe Supervisor
+            df_show2 = resumo[resumo['Total_Horas_Atraso'] > 0].sort_values(by='Total_Horas_Atraso', ascending=False)
+            ev2 = st.dataframe(
+                df_show2[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola', 'Tempo_Atraso_Fmt', 'Datas']], 
+                use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t2",
+                column_config={"Tempo_Atraso_Fmt": st.column_config.TextColumn("Horas Totais")}
             )
+            if ev2.selection.rows: func_abrir = df_show2.iloc[ev2.selection.rows[0]]
+
+        with t3:
+            # Agora exibe Supervisor
+            st.dataframe(df_sem[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Escola']], use_container_width=True, hide_index=True)
+
+        with t4:
+            st.dataframe(resumo, use_container_width=True, hide_index=True)
+            csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
+            st.download_button("📥 Baixar CSV Consolidado", csv, f"relatorio_{per_cache}.csv", "text/csv")
+
+        if func_abrir is not None:
+            mostrar_espelho_modal(func_abrir['Funcionario'], func_abrir['NRVINCULOM'], per_cache)
