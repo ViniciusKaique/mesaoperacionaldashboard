@@ -9,7 +9,7 @@ from datetime import datetime
 # ==============================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-st.set_page_config(page_title="Extrator Massivo SME", layout="wide", page_icon="🚜")
+st.set_page_config(page_title="Extrator Relatório Gerencial", layout="wide", page_icon="🚜")
 
 # ==============================================================================
 # 2. SEGURANÇA E ESTADO
@@ -19,7 +19,7 @@ if not st.session_state.get("authentication_status"):
     st.stop()
 
 if 'api_token' not in st.session_state or not st.session_state['api_token']:
-    st.error("Token não encontrado. Recarregue a Home.")
+    st.error("Token de autenticação não encontrado. Por favor, recarregue a página inicial e faça login novamente.")
     st.stop()
 
 # ==============================================================================
@@ -27,6 +27,7 @@ if 'api_token' not in st.session_state or not st.session_state['api_token']:
 # ==============================================================================
 BASE_URL = "https://limpeza.sme.prefeitura.sp.gov.br/api/web"
 
+# Headers idênticos ao do navegador (Baseado no seu Log HAR)
 HEADERS_TEMPLATE = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -49,75 +50,79 @@ def get_headers():
 # ==============================================================================
 # 4. MOTOR DE EXTRAÇÃO (PAGINAÇÃO)
 # ==============================================================================
-def buscar_ids_via_tabela(mes, ano):
+def buscar_todos_ids_paginados(mes, ano):
     """
-    Varre a API de tabela paginada para pegar TODOS os IDs.
+    Varre a tabela página por página para coletar TODOS os IDs.
     """
     url = f"{BASE_URL}/relatorio/relatorio-gerencial/tabela"
     headers = get_headers()
     
-    lista_final = []
+    lista_ids = []
+    
+    # Parâmetros iniciais
     start = 0
-    length = 100 # Tenta pegar 100 por vez para ser mais rápido
-    total_registros = 1 # Valor dummy para iniciar o loop
+    length = 100 # Vamos tentar pegar 100 por vez para ser mais rápido (o padrão é 25)
+    total_records = 1 # Valor dummy para entrar no loop
+    draw = 1
     
-    status_msg = st.empty()
+    status_text = st.empty()
     
-    while start < total_registros:
-        # Filtro obrigatório para a tabela funcionar
-        filtros = json.dumps({"mes": str(mes), "ano": int(ano)})
+    while start < total_records:
+        # Filtro JSON stringificado conforme o log
+        filtros_json = json.dumps({"mes": str(mes), "ano": int(ano)})
         
         params = {
-            "draw": "1",
-            "filters": filtros,
-            "length": length,
-            "start": start
+            "draw": str(draw),
+            "filters": filtros_json,
+            "length": str(length),
+            "start": str(start)
         }
         
         try:
-            status_msg.text(f"🔄 Buscando página (Start: {start})...")
+            status_text.text(f"🔄 Varrendo tabela (Registro {start} em diante)...")
+            
             r = requests.get(url, headers=headers, params=params, timeout=20)
             
             if r.status_code == 200:
                 data = r.json()
                 
-                # O formato do DataTables geralmente retorna 'data' e 'recordsTotal'
-                registros = data.get('data', [])
-                total_registros = int(data.get('recordsTotal', 0) or data.get('recordsFiltered', 0))
+                # Atualiza o total de registros com a verdade da API
+                # O campo pode vir como 'recordsTotal' ou 'recordsFiltered'
+                total_records = int(data.get('recordsTotal', 0) or data.get('recordsFiltered', 0))
                 
-                if not registros:
-                    break
-                    
-                for item in registros:
-                    # Precisamos extrair o ID para buscar o detalhe depois.
-                    # O item geralmente vem com a estrutura da linha da tabela.
-                    # Vamos tentar pegar 'id' ou 'unidadeEscolar.id'
+                itens = data.get('data', [])
+                if not itens:
+                    break # Se não veio nada, para
+                
+                for item in itens:
+                    # Extrai ID e Nome para usar depois
                     u_id = item.get('id')
                     
-                    # Nome da escola (pode estar aninhado)
-                    nome_escola = "Desconhecido"
+                    # Tenta pegar o nome da escola (pode estar aninhado)
+                    u_nome = "Desconhecido"
                     if 'unidadeEscolar' in item and isinstance(item['unidadeEscolar'], dict):
-                        nome_escola = item['unidadeEscolar'].get('descricao', 'Sem Nome')
-                    elif 'unidadeEscolar' in item:
-                        nome_escola = str(item['unidadeEscolar'])
+                        u_nome = item['unidadeEscolar'].get('descricao', 'Desconhecido')
                     
                     if u_id:
-                        lista_final.append({'id': u_id, 'nome': nome_escola})
+                        lista_ids.append({'id': u_id, 'nome': u_nome})
                 
+                # Prepara para a próxima página
                 start += length
-                time.sleep(0.1) # Evita block
+                draw += 1
+                time.sleep(0.1) # Respira
             else:
-                st.error(f"Erro {r.status_code} na paginação.")
+                st.error(f"Erro na paginação: {r.status_code} - {r.text}")
                 break
+                
         except Exception as e:
-            st.error(f"Erro na varredura: {e}")
+            st.error(f"Erro de conexão na listagem: {e}")
             break
-            
-    status_msg.empty()
-    return lista_final
+    
+    status_text.empty()
+    return lista_ids
 
-def buscar_detalhe(id_relatorio):
-    """Busca o JSON completo de detalhe (equipe, valores, etc)."""
+def buscar_detalhe_relatorio(id_relatorio):
+    """Busca o JSON completo de um relatório específico."""
     url = f"{BASE_URL}/relatorio/relatorio-gerencial/{id_relatorio}"
     try:
         r = requests.get(url, headers=get_headers(), timeout=15)
@@ -127,129 +132,150 @@ def buscar_detalhe(id_relatorio):
         pass
     return None
 
-def achatar_dados(json_detalhe, id_origem, nome_origem):
-    """Transforma o JSON complexo em linha de Excel."""
-    dado = json_detalhe.get('data', json_detalhe)
-    if not dado: return None
+def processar_para_excel(dado_json, id_origem, nome_origem):
+    """Transforma o JSON hierárquico em uma linha plana."""
+    # O JSON detalhado pode vir dentro de uma chave 'data' ou direto
+    dado = dado_json.get('data', dado_json)
     
-    # Se retornar lista (histórico), pega o primeiro ou processa todos (aqui assume 1 por ID)
-    if isinstance(dado, list): dado = dado[0]
-    
+    # Se for lista (histórico), pega o primeiro item (o mais recente)
+    if isinstance(dado, list):
+        if not dado: return None
+        dado = dado[0]
+        
+    if not isinstance(dado, dict): return None
+
+    # Extrai sub-objetos com segurança
     ue = dado.get('unidadeEscolar', {}) or {}
-    prest = dado.get('prestadorServico', {}) or {}
+    prestador = dado.get('prestadorServico', {}) or {}
     
-    # Soma equipe
-    faltas = 0
-    desc_eq = 0.0
-    equipe = dado.get('equipeAlocada', [])
-    if equipe:
-        for f in equipe:
-            faltas += (f.get('quantidadeAusente') or 0)
-            try: desc_eq += float(f.get('valorDesconto') or 0)
+    # Processa Equipe (Soma faltas e valores)
+    soma_faltas = 0
+    soma_desc_equipe = 0.0
+    lista_equipe = dado.get('equipeAlocada', [])
+    
+    if lista_equipe and isinstance(lista_equipe, list):
+        for func in lista_equipe:
+            soma_faltas += (func.get('quantidadeAusente') or 0)
+            try: soma_desc_equipe += float(func.get('valorDesconto') or 0)
             except: pass
 
-    # Tenta pegar notas
+    # Tenta pegar notas específicas (Insumos vs Equipe) nos detalhes
     nota_insumos = 0
     nota_equipe = 0
-    detalhes_notas = dado.get('detalhe', [])
-    if detalhes_notas:
-        for d in detalhes_notas:
+    detalhes = dado.get('detalhe', [])
+    if detalhes:
+        for d in detalhes:
             desc = str(d.get('descricao', '')).lower()
             if 'insumo' in desc: nota_insumos = d.get('pontuacaoFinal', 0)
-            if 'equipe' in desc: nota_equipe = d.get('pontuacaoFinal', 0)
+            if 'equipe' in desc or 'atividade' in desc: nota_equipe = d.get('pontuacaoFinal', 0)
+
+    # Função auxiliar para formatar dinheiro BR
+    def fmt_moeda(valor):
+        try: return f"{float(valor):.2f}".replace('.', ',')
+        except: return "0,00"
 
     return {
         "ID Relatório": id_origem,
         "Escola": nome_origem,
-        "Cod EOL": ue.get('codigo', ''),
-        "Mês": dado.get('mes'),
-        "Ano": dado.get('ano'),
-        "Pontuação Final": dado.get('pontuacaoFinal'),
+        "Código EOL": ue.get('codigo', ''),
+        "Tipo Escola": ue.get('tipo', ''),
+        "Mês": dado.get('mes', ''),
+        "Ano": dado.get('ano', ''),
+        "Nota Final": dado.get('pontuacaoFinal', 0),
         "Nota Equipe": nota_equipe,
         "Nota Insumos": nota_insumos,
-        "Valor Bruto": f"{float(dado.get('valorBruto') or 0):.2f}".replace('.',','),
-        "Valor Líquido": f"{float(dado.get('valorLiquido') or 0):.2f}".replace('.',','),
-        "Glosa RH": f"{float(dado.get('descontoGlosaRh') or 0):.2f}".replace('.',','),
-        "Total Faltas": faltas,
-        "Desc. Equipe R$": f"{desc_eq:.2f}".replace('.',','),
+        "Valor Bruto": fmt_moeda(dado.get('valorBruto', 0)),
+        "Valor Líquido": fmt_moeda(dado.get('valorLiquido', 0)),
+        "Glosa RH": fmt_moeda(dado.get('descontoGlosaRh', 0)),
+        "Total Faltas": soma_faltas,
+        "Desc. Equipe (R$)": fmt_moeda(soma_desc_equipe),
         "Status Fiscal": "Aprovado" if dado.get('flagAprovadoFiscal') else "Pendente",
-        "Data Fiscal": dado.get('dataHoraAprovacaoFiscal'),
-        "Fiscal": dado.get('nomeUsuarioAprovacaoFiscal'),
+        "Data Fiscal": dado.get('dataHoraAprovacaoFiscal', ''),
+        "Nome Fiscal": dado.get('nomeUsuarioAprovacaoFiscal', ''),
         "Status DRE": "Aprovado" if dado.get('flagAprovadoDre') else "Pendente",
-        "Prestador": prest.get('razaoSocial')
+        "Prestador": prestador.get('razaoSocial', '')
     }
 
 # ==============================================================================
-# 5. INTERFACE
+# 5. INTERFACE DO USUÁRIO
 # ==============================================================================
-st.title("🚜 Extrator Massivo SME (Paginação Automática)")
-st.info("Este extrator percorre todas as páginas da tabela para garantir que as 146 escolas sejam encontradas.")
+st.title("🚜 Extrator Massivo SME (Paginação)")
+st.markdown("Este módulo percorre todas as páginas da tabela, coleta os IDs e extrai os detalhes financeiros.")
 
+# Filtros obrigatórios para a requisição da tabela funcionar
 c1, c2, c3 = st.columns(3)
 mes_sel = c1.number_input("Mês de Referência", min_value=1, max_value=12, value=12)
 ano_sel = c2.number_input("Ano de Referência", min_value=2024, max_value=2030, value=2025)
 
-if c3.button("🚀 Iniciar Varredura Completa", type="primary", use_container_width=True):
+if c3.button("🚀 Iniciar Extração Completa", type="primary", use_container_width=True):
     
-    # 1. VARREDURA (Paginação)
-    with st.status("🔍 Varrendo tabela paginada...", expanded=True) as status:
-        st.write("Conectando à API de Tabela...")
-        lista_escolas = buscar_ids_via_tabela(mes_sel, ano_sel)
-        
-        total = len(lista_escolas)
-        if total == 0:
-            status.update(label="❌ Nenhuma escola encontrada!", state="error")
-            st.stop()
-        
-        status.update(label=f"✅ Sucesso! {total} relatórios encontrados para {mes_sel}/{ano_sel}.", state="complete")
-    
+    # 1. VARREDURA DE LISTA
     st.divider()
+    with st.spinner(f"🔍 Varrendo todas as páginas para {mes_sel}/{ano_sel}..."):
+        lista_final = buscar_todos_ids_paginados(mes_sel, ano_sel)
+        
+    total_encontrado = len(lista_final)
     
-    # 2. EXTRAÇÃO DETALHADA
-    st.write(f"📥 Baixando detalhes de **{total}** unidades...")
-    progress = st.progress(0)
-    bar_text = st.empty()
+    if total_encontrado == 0:
+        st.warning("⚠️ Nenhum relatório encontrado para este período. Verifique Mês/Ano.")
+        st.stop()
+        
+    st.success(f"✅ Lista carregada! Encontrados **{total_encontrado}** relatórios para processar.")
     
+    # 2. LOOP DE DETALHES
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     dados_consolidados = []
     
     start_time = time.time()
     
-    for i, item in enumerate(lista_escolas):
-        perc = (i + 1) / total
-        progress.progress(perc)
-        bar_text.text(f"({i+1}/{total}) Extraindo: {item['nome']}")
+    # Container para erros (se houver)
+    err_container = st.container()
+    
+    for i, item in enumerate(lista_final):
+        # Atualiza barra
+        perc = (i + 1) / total_encontrado
+        progress_bar.progress(perc)
+        status_text.text(f"Baixando detalhes ({i+1}/{total_encontrado}): {item['nome']}")
         
-        detalhe = buscar_detalhe(item['id'])
+        # Request do detalhe
+        json_detalhe = buscar_detalhe_relatorio(item['id'])
         
-        if detalhe:
-            linha = achatar_dados(detalhe, item['id'], item['nome'])
-            if linha: dados_consolidados.append(linha)
-        
-        # Pausa mínima para não travar
+        if json_detalhe:
+            linha = processar_para_excel(json_detalhe, item['id'], item['nome'])
+            if linha:
+                dados_consolidados.append(linha)
+        else:
+            err_container.error(f"Falha ao baixar ID: {item['id']}")
+            
+        # Pequena pausa para evitar bloqueio
         time.sleep(0.05)
+        
+    tempo_total = time.time() - start_time
+    status_text.text("Concluído!")
     
-    tempo = time.time() - start_time
-    bar_text.text("Processamento finalizado!")
-    
-    # 3. EXCEL
+    # 3. GERAÇÃO DO EXCEL
     if dados_consolidados:
         df = pd.DataFrame(dados_consolidados)
-        st.success(f"🎉 Extração concluída em {tempo:.1f}s. Registros processados: {len(df)}")
+        
+        st.balloons()
+        st.success(f"🎉 Processamento finalizado em {tempo_total:.1f}s. {len(df)} registros gerados.")
+        
         st.dataframe(df.head(), use_container_width=True)
         
+        # Buffer Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Base_SME')
-            worksheet = writer.sheets['Base_SME']
-            worksheet.set_column(0, 20, 18) # Ajuste largura colunas
+            df.to_excel(writer, index=False, sheet_name='Consolidado')
+            worksheet = writer.sheets['Consolidado']
+            worksheet.set_column(0, 20, 20) # Ajuste largura
             
         st.download_button(
-            label=f"💾 Baixar Relatório Completo ({mes_sel}_{ano_sel}).xlsx",
+            label=f"📥 Baixar Planilha Consolidada ({mes_sel}_{ano_sel})",
             data=buffer,
-            file_name=f"SME_Geral_{mes_sel}-{ano_sel}.xlsx",
+            file_name=f"Relatorio_SME_{mes_sel}-{ano_sel}.xlsx",
             mime="application/vnd.ms-excel",
-            type="primary",
-            use_container_width=True
+            type="primary"
         )
     else:
-        st.error("Houve erros na extração dos detalhes. Tente novamente.")
+        st.error("Erro grave: Lista de IDs foi carregada, mas nenhum detalhe pôde ser extraído.")
