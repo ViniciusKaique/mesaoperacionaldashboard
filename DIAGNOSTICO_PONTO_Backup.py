@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import pytz
-import urllib.parse
 from datetime import datetime
 from sqlalchemy import text
 import plotly.express as px
@@ -129,97 +128,58 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. BANCO DE DADOS - SUPERVISORES & VALIDAÇÃO
+# 4. BANCO DE DADOS - MAPEAMENTO (Matrícula -> Supervisor)
 # ==============================================================================
-
-def save_validacao_batch(conn, df_changes, periodo):
-    """Salva as validações de procedência no banco"""
-    if df_changes.empty: return
-    try:
-        with conn.session as session:
-            for index, row in df_changes.iterrows():
-                query = text("""
-                    INSERT INTO "ValidacaoPonto" ("ColaboradorID", "Periodo", "Procedente", "DataVerificacao")
-                    VALUES (:cid, :per, :proc, NOW())
-                    ON CONFLICT ("ColaboradorID", "Periodo") 
-                    DO UPDATE SET "Procedente" = EXCLUDED."Procedente", "DataVerificacao" = NOW();
-                """)
-                session.execute(query, {
-                    'cid': int(row['NRVINCULOM']),
-                    'per': str(periodo),
-                    'proc': bool(row['Procedente'])
-                })
-            session.commit()
-        st.toast("Validações salvas com sucesso!", icon="💾")
-    except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
-
-def fetch_validacoes(conn, periodo):
-    """Busca validações existentes para o período"""
-    try:
-        query = text('SELECT "ColaboradorID", "Procedente" FROM "ValidacaoPonto" WHERE "Periodo" = :per')
-        df = conn.query(query, params={'per': str(periodo)}, ttl=0)
-        if not df.empty:
-            df['ColaboradorID'] = df['ColaboradorID'].astype(str)
-            return dict(zip(df['ColaboradorID'], df['Procedente']))
-    except: pass
-    return {}
-
 @st.cache_data(ttl=600)
-def fetch_dados_supervisores_completo():
-    """Busca mapa de supervisores e seus telefones"""
+def fetch_mapa_supervisores_por_vinculo():
     try:
         conn = st.connection("postgres", type="sql")
-        
-        # Mapa: Matrícula -> Supervisor
-        q1 = """
-        SELECT col."ColaboradorID" as "Matricula", s."NomeSupervisor" as "Supervisor"
+        query = """
+        SELECT 
+            col."ColaboradorID" as "Matricula", 
+            s."NomeSupervisor" as "Supervisor"
         FROM "Colaboradores" col
         JOIN "Unidades" u ON col."UnidadeID" = u."UnidadeID"
         JOIN "Supervisores" s ON u."SupervisorID" = s."SupervisorID"
         WHERE col."Ativo" = TRUE
         """
-        df_map = conn.query(q1)
-        mapa_sup = {}
-        if not df_map.empty:
-            df_map['Matricula'] = pd.to_numeric(df_map['Matricula'], errors='coerce').fillna(0).astype(int).astype(str)
-            df_map['Supervisor'] = df_map['Supervisor'].str.strip().str.upper()
-            mapa_sup = dict(zip(df_map['Matricula'], df_map['Supervisor']))
-
-        # Mapa: Supervisor -> Celular
-        q2 = 'SELECT "NomeSupervisor", "Celular" FROM "Supervisores"'
-        df_tel = conn.query(q2)
-        mapa_tel = {}
-        if not df_tel.empty:
-            mapa_tel = dict(zip(
-                df_tel['NomeSupervisor'].str.strip().str.upper(), 
-                df_tel['Celular']
-            ))
-
-        return mapa_sup, mapa_tel
+        df = conn.query(query)
+        if not df.empty:
+            df['Matricula'] = pd.to_numeric(df['Matricula'], errors='coerce').fillna(0).astype(int).astype(str)
+            df['Supervisor'] = df['Supervisor'].str.strip().str.upper()
+            return dict(zip(df['Matricula'], df['Supervisor']))
+        return {}
     except Exception as e:
-        return {}, {}
+        return {}
 
 # ==============================================================================
-# 5. API FERIADOS & HELPERS
+# 5. API FERIADOS (BRASIL API)
 # ==============================================================================
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=86400) # Cache de 24h
 def fetch_feriados_brasil(ano):
+    """Busca feriados nacionais na BrasilAPI"""
     url = f"https://brasilapi.com.br/api/feriados/v1/{ano}"
     try:
         r = requests.get(url, timeout=5)
-        if r.status_code == 200: return r.json() 
+        if r.status_code == 200:
+            return r.json() 
     except: pass
     return []
 
 def get_feriados_set(anos_lista):
+    """Gera um dicionário { '2026-01-01': 'Ano Novo' } para os anos solicitados"""
     feriados_dict = {}
-    if not anos_lista: anos_lista = [datetime.now().year]
+    # Se a lista de anos vier vazia ou nula, garante o ano atual
+    if not anos_lista:
+        anos_lista = [datetime.now().year]
+        
     for ano in anos_lista:
         dados = fetch_feriados_brasil(ano)
         if dados:
-            for f in dados: feriados_dict[f['date']] = f['name']
+            for f in dados:
+                feriados_dict[f['date']] = f['name']
         else:
+            # Fallback Manual se API falhar
             feriados_dict.update({
                 f"{ano}-01-01": "Confraternização Universal",
                 f"{ano}-04-21": "Tiradentes",
@@ -233,21 +193,8 @@ def get_feriados_set(anos_lista):
             })
     return feriados_dict
 
-def decimal_para_hora(val):
-    try:
-        if pd.isna(val) or val == 0: return "00:00"
-        horas = int(val)
-        minutos = int((val - horas) * 60)
-        return f"{horas:02d}:{minutos:02d}"
-    except: return "00:00"
-
-def gerar_link_whatsapp(telefone, mensagem):
-    texto_encoded = urllib.parse.quote_plus(mensagem)
-    fone_limpo = "".join(filter(str.isdigit, str(telefone))) if telefone else ""
-    return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
-
 # ==============================================================================
-# 6. API PORTAL GESTOR & HCM
+# 6. API PORTAL GESTOR
 # ==============================================================================
 @st.cache_data(ttl=3600)
 def fetch_estruturas_gestor():
@@ -266,10 +213,15 @@ def fetch_estruturas_gestor():
 def fetch_ids_portal_gestor(data_ref, codigo_estrutura):
     url = "https://portalgestor.teknisa.com/backend/index.php/getMesaOperacoes"
     params = {
-        "requestType": "FilterData", "DIA": data_ref.strftime("%d/%m/%Y"),
-        "NRESTRUTURAM": codigo_estrutura, "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
+        "requestType": "FilterData",
+        "DIA": data_ref.strftime("%d/%m/%Y"),
+        "NRESTRUTURAM": codigo_estrutura,
+        "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
     }
-    headers = { "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG, "User-Agent": "Mozilla/5.0" }
+    headers = {
+        "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG,
+        "User-Agent": "Mozilla/5.0"
+    }
     try:
         r = requests.get(url, params=params, headers=headers, timeout=30)
         if r.status_code == 200:
@@ -297,6 +249,9 @@ def fetch_periodos_apuracao():
     except: pass
     return pd.DataFrame()
 
+# ==============================================================================
+# 7. API HCM
+# ==============================================================================
 def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competencia):
     url = "https://hcm.teknisa.com/backend/index.php/getMarcacaoPontoOcorrencias"
     headers = {
@@ -327,15 +282,25 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
         st.error(f"Erro na requisição: {e}")
     return pd.DataFrame()
 
+def decimal_para_hora(val):
+    try:
+        if pd.isna(val) or val == 0: return "00:00"
+        horas = int(val)
+        minutos = int((val - horas) * 60)
+        return f"{horas:02d}:{minutos:02d}"
+    except: return "00:00"
+
 # ==============================================================================
-# 7. MODAIS E DIALOGS
+# 8. API HCM - DETALHES (MODAL)
 # ==============================================================================
 @st.cache_data(ttl=300)
 def fetch_dias_demonstrativo(vinculo, periodo):
     url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
     params = {
-        "requestType": "FilterData", "NRVINCULOM": str(vinculo).split('.')[0],
-        "NRPERIODOAPURACAO": periodo, "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
+        "requestType": "FilterData",
+        "NRVINCULOM": str(vinculo).split('.')[0],
+        "NRPERIODOAPURACAO": periodo,
+        "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
     }
     headers = { "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG }
     try:
@@ -358,65 +323,8 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
     else:
         st.warning("Sem dados detalhados.")
 
-@st.dialog("📢 Disparar Alertas de Ponto", width="large")
-def dialog_alertas_ponto(df_resumo, mapa_tel, periodo):
-    st.caption(f"Envio de cobrança sobre Faltas e Atrasos (Período: {periodo})")
-    
-    # Filtra quem tem problema (Falta ou Atraso)
-    df_probs = df_resumo[
-        (df_resumo['Qtd_Faltas'] > 0) | (df_resumo['Total_Horas_Atraso'] > 0)
-    ].copy()
-
-    if df_probs.empty:
-        st.success("Tudo limpo! Nenhuma ocorrência para cobrar.")
-        return
-
-    supervisores = sorted(df_probs['Supervisor'].unique())
-
-    for sup in supervisores:
-        with st.container(border=True):
-            c1, c2 = st.columns([3, 1])
-            
-            df_sup = df_probs[df_probs['Supervisor'] == sup]
-            total_f = df_sup['Qtd_Faltas'].sum()
-            total_h = df_sup['Total_Horas_Atraso'].sum() # em decimal
-            
-            # Monta Mensagem
-            msg_lines = [f"Ola *{sup}*, verificacao de ponto ({periodo}):"]
-            msg_lines.append("")
-            
-            for _, row in df_sup.iterrows():
-                detalhes = []
-                if row['Qtd_Faltas'] > 0: detalhes.append(f"{row['Qtd_Faltas']} Faltas")
-                if row['Total_Horas_Atraso'] > 0: detalhes.append(f"{decimal_para_hora(row['Total_Horas_Atraso'])}h Atraso")
-                
-                if detalhes:
-                    msg_lines.append(f"👤 *{row['Funcionario']}*")
-                    msg_lines.append(f"⚠️ {', '.join(detalhes)}")
-                    msg_lines.append(f"📅 Dias: {row['Datas']}")
-                    msg_lines.append("")
-            
-            msg_lines.append("Por favor, verificar se procede.")
-            msg_final = "\n".join(msg_lines)
-
-            # Pega Telefone
-            tel = mapa_tel.get(sup)
-
-            with c1:
-                st.markdown(f"**👤 {sup}**")
-                st.caption(f"Faltas: {total_f} | Atrasos: {decimal_para_hora(total_h)}")
-                with st.expander("Ver texto"):
-                    st.text(msg_final)
-            
-            with c2:
-                if tel:
-                    link = gerar_link_whatsapp(tel, msg_final)
-                    st.link_button("📲 Enviar", link, use_container_width=True)
-                else:
-                    st.warning("Sem Celular")
-
 # ==============================================================================
-# 8. LÓGICA PRINCIPAL (UI)
+# 9. LÓGICA PRINCIPAL
 # ==============================================================================
 
 st.title("⚡ Relatório Turbo - Faltas e Atrasos (HCM)")
@@ -474,15 +382,15 @@ if st.session_state["busca_realizada"]:
     
     # 1. BUSCA (CACHE)
     if not st.session_state["dados_cache"]:
-        with st.status("🔄 Buscando dados e validando...", expanded=True) as status:
+        with st.status("🔄 Buscando dados...", expanded=True) as status:
             # A) Lista de IDs da API
             df_func = fetch_ids_portal_gestor(data_ref, est_id)
             if df_func.empty:
                 status.update(label="❌ Sem funcionários.", state="error")
                 st.session_state["busca_realizada"] = False; st.stop()
             
-            # B) Mapa de Supervisores e Celulares [ATUALIZADO]
-            mapa_supervisores, mapa_telefones = fetch_dados_supervisores_completo()
+            # B) Mapa de Supervisores do Banco de Dados (Pelo ID)
+            mapa_supervisores = fetch_mapa_supervisores_por_vinculo()
             
             if 'NMESTRUTGEREN' not in df_func.columns: df_func['NMESTRUTGEREN'] = "GERAL"
             
@@ -495,28 +403,19 @@ if st.session_state["busca_realizada"]:
             # C) Ocorrências do HCM
             df_oco = fetch_ocorrencias_hcm_turbo(token, lista_ids, per_id, mes_hcm)
             
-            # D) Validações Salvas no Banco [NOVO]
-            conn = st.connection("postgres", type="sql")
-            validacoes_db = fetch_validacoes(conn, per_id)
-
             st.session_state["dados_cache"] = {
                 "funcionarios": df_func, 
                 "ocorrencias": df_oco, 
                 "periodo": per_id, 
-                "mapa_sup": mapa_supervisores,
-                "mapa_tel": mapa_telefones,     # <--- Novo
-                "validacoes": validacoes_db     # <--- Novo
+                "mapa_sup": mapa_supervisores
             }
             status.update(label="Pronto!", state="complete", expanded=False)
             st.rerun()
 
-    # Recupera Cache
     df_func = st.session_state["dados_cache"]["funcionarios"].copy()
     df_oco = st.session_state["dados_cache"]["ocorrencias"].copy()
     per_cache = st.session_state["dados_cache"]["periodo"]
     mapa_sup = st.session_state["dados_cache"]["mapa_sup"]
-    mapa_tel = st.session_state["dados_cache"]["mapa_tel"]   # <--- Novo
-    dict_validacoes = st.session_state["dados_cache"]["validacoes"] # <--- Novo
 
     # --- APLICAÇÃO DOS MAPAS ---
     df_func['NRVINCULOM'] = df_func['NRVINCULOM'].astype(str)
@@ -586,12 +485,8 @@ if st.session_state["busca_realizada"]:
             resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
             resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
             resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
-            
-            # Mapeia Validações do Banco
-            resumo['Procedente'] = resumo['NRVINCULOM'].map(dict_validacoes).fillna(False)
-
         else:
-            resumo = pd.DataFrame(columns=['NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Total_Horas_Atraso', 'Datas', 'Procedente'])
+            resumo = pd.DataFrame(columns=['NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Total_Horas_Atraso', 'Datas'])
             df_faltas_feriado = pd.DataFrame()
 
         # SEM OCORRÊNCIAS
@@ -608,13 +503,8 @@ if st.session_state["busca_realizada"]:
         total_faltas = resumo['Qtd_Faltas'].sum() if not resumo.empty else 0
         c4.metric("Faltas (Dias Úteis)", total_faltas, delta_color="inverse")
 
-        # --- BOTÃO DE ALERTAS (NOVO) ---
         st.divider()
-        c_alert, _ = st.columns([1, 4])
-        with c_alert:
-            if st.button("📢 Central de Alertas", type="primary", use_container_width=True):
-                dialog_alertas_ponto(resumo, mapa_tel, per_cache)
-
+        
         # GRÁFICO (Cores Ajustadas: Azul para Excelente)
         st.subheader("📊 Visão por Supervisor")
         grp_excelente = df_sem.groupby('Supervisor').size().reset_index(name='Ponto Excelente')
@@ -636,40 +526,16 @@ if st.session_state["busca_realizada"]:
         st.markdown("---")
 
         # ABAS
-        t1, t2, t3, t4, t5 = st.tabs(["🏆 Ranking Faltas (Validação)", "📉 Ranking Atrasos", "🎅 Faltas Feriado", "✅ Ponto Excelente", "📋 Base Completa"])
+        t1, t2, t3, t4, t5 = st.tabs(["🏆 Ranking Faltas", "📉 Ranking Atrasos", "🎅 Faltas Feriado", "✅ Ponto Excelente", "📋 Base Completa"])
         func_abrir = None
         
-        # ABA 1: Ranking Faltas com Editor
         with t1:
-            st.caption("Marque a caixa 'Procedente' se a falta foi confirmada pelo supervisor.")
+            st.caption("Considerando apenas dias úteis (Seg-Sex).")
             if not resumo.empty:
                 df_show = resumo[resumo['Qtd_Faltas'] > 0].sort_values(by='Qtd_Faltas', ascending=False)
-                
-                with st.form("form_validacao_faltas"):
-                    edited_df = st.data_editor(
-                        df_show[['Procedente', 'NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Datas']],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "Procedente": st.column_config.CheckboxColumn("Procedente?", help="Supervisor confirmou a falta", default=False),
-                            "Qtd_Faltas": st.column_config.NumberColumn("Dias", format="%d ❌"),
-                            "NRVINCULOM": st.column_config.TextColumn("Matrícula", disabled=True),
-                            "Funcionario": st.column_config.TextColumn("Funcionário", disabled=True),
-                            "Supervisor": st.column_config.TextColumn("Supervisor", disabled=True),
-                        },
-                        key="editor_faltas"
-                    )
-                    
-                    if st.form_submit_button("💾 Salvar Validações (Faltas)"):
-                        conn = st.connection("postgres", type="sql")
-                        save_validacao_batch(conn, edited_df, per_cache)
-                        
-                        # Atualiza cache local
-                        novas_validacoes = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
-                        st.session_state["dados_cache"]["validacoes"].update(novas_validacoes)
-                        st.rerun()
-            else: 
-                st.info("Sem faltas.")
+                ev = st.dataframe(df_show[['NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Datas']], use_container_width=True, hide_index=True, selection_mode="single-row", on_select="rerun", key="t1", column_config={"Qtd_Faltas": st.column_config.NumberColumn("Dias", format="%d ❌")})
+                if ev.selection.rows: func_abrir = df_show.iloc[ev.selection.rows[0]]
+            else: st.info("Sem faltas.")
 
         with t2:
             if not resumo.empty:
@@ -691,7 +557,7 @@ if st.session_state["busca_realizada"]:
         with t5:
             st.dataframe(resumo, use_container_width=True, hide_index=True)
             csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-            st.download_button("📥 Baixar Planilha", csv, f"relatorio_{per_cache}.csv", "text/csv")
+            st.download_button("📥 Baixar CSV Consolidado", csv, f"relatorio_{per_cache}.csv", "text/csv")
 
         if func_abrir is not None:
             mostrar_espelho_modal(func_abrir['Funcionario'], func_abrir['NRVINCULOM'], per_cache)
