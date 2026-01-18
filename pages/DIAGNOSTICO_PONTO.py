@@ -176,7 +176,7 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
                     'sh': snap_horas
                 })
             session.commit()
-        st.toast("Validações e Snapshot salvos!", icon="📸")
+        st.toast(f"{len(df_changes)} Validações salvas com sucesso!", icon="🚀")
     except Exception as e:
         st.error(f"Erro ao salvar: {e}")
 
@@ -666,7 +666,7 @@ if st.session_state["busca_realizada"]:
         # ABAS
         t1, t2, t3 = st.tabs(["🔥 Ranking de Criticidade (Unificado)", "✅ Ponto Excelente", "📋 Base Completa"])
         
-        # ABA 1: RANKING UNIFICADO
+        # ABA 1: RANKING UNIFICADO (OTIMIZADO)
         with t1:
             st.caption("Ordenado por Score (Faltas primeiro, depois volume de horas). Valide clicando em 'Procedente'.")
             
@@ -708,27 +708,38 @@ if st.session_state["busca_realizada"]:
                     )
                     
                     if st.form_submit_button("💾 Salvar Validações"):
-                        conn = st.connection("postgres", type="sql")
-                        usuario_atual = st.session_state.get("name", "Usuario Desconhecido")
+                        # OTIMIZAÇÃO: Identifica apenas linhas alteradas
+                        dict_changes = st.session_state.get("editor_unificado", {}).get("edited_rows", {})
                         
-                        save_validacao_batch_snapshot(conn, edited_df, per_cache, usuario_atual)
-                        
-                        # Atualiza Cache Instantaneamente
-                        new_proc = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
-                        new_user = {k: usuario_atual for k, v in new_proc.items() if v}
-                        
-                        # Formata snapshot texto para o cache visual
-                        def fmt(row):
-                            f = int(row['Qtd_Faltas'])
-                            h = float(row['Total_Horas_Atraso'])
-                            return f"{f} Faltas | {decimal_para_hora(h)}h"
-                        
-                        new_snap = {row['NRVINCULOM']: fmt(row) for _, row in edited_df.iterrows() if row['Procedente']}
-                        
-                        st.session_state["dados_cache"]["validacoes"].update(new_proc)
-                        st.session_state["dados_cache"]["usuarios_validacao"].update(new_user)
-                        st.session_state["dados_cache"]["snapshots"].update(new_snap)
-                        st.rerun()
+                        if not dict_changes:
+                            st.info("Nenhuma alteração detectada para salvar.")
+                        else:
+                            # Filtra o DF para pegar apenas os índices que foram tocados
+                            indices_modificados = list(dict_changes.keys())
+                            df_to_save = edited_df.iloc[indices_modificados].copy()
+                            
+                            conn = st.connection("postgres", type="sql")
+                            usuario_atual = st.session_state.get("name", "Usuario Desconhecido")
+                            
+                            # Salva apenas o subconjunto modificado
+                            save_validacao_batch_snapshot(conn, df_to_save, per_cache, usuario_atual)
+                            
+                            # Atualiza Cache Local (Manual) para feedback imediato
+                            new_proc = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
+                            new_user = {k: usuario_atual for k, v in new_proc.items() if v}
+                            
+                            # Formata snapshot texto para o cache visual
+                            def fmt(row):
+                                f = int(row['Qtd_Faltas'])
+                                h = float(row['Total_Horas_Atraso'])
+                                return f"{f} Faltas | {decimal_para_hora(h)}h"
+                            
+                            new_snap = {row['NRVINCULOM']: fmt(row) for _, row in edited_df.iterrows() if row['Procedente']}
+                            
+                            st.session_state["dados_cache"]["validacoes"].update(new_proc)
+                            st.session_state["dados_cache"]["usuarios_validacao"].update(new_user)
+                            st.session_state["dados_cache"]["snapshots"].update(new_snap)
+                            st.rerun()
             else:
                 st.success("Nenhuma falta ou atraso encontrado!")
 
