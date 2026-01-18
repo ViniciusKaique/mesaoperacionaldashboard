@@ -734,7 +734,7 @@ if st.session_state["busca_realizada"]:
                     help="Risco calculado (Falta = 20pts, Hora = 1pt)",
                     format="%d",
                     min_value=0,
-                    max_value=200, # Escala visual (quem passar de 200 enche a barra)
+                    max_value=20, # Escala visual (quem passar de 200 enche a barra)
                 ),
                 "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
                 "Tempo_Atraso_Fmt": st.column_config.TextColumn("Atrasos"),
