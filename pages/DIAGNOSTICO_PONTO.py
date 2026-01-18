@@ -19,36 +19,47 @@ if not st.session_state.get("authentication_status"):
     st.warning("🔒 Acesso restrito. Faça login na página inicial.")
     st.stop()
 
-# --- CREDENCIAIS HCM ---
+# --- CREDENCIAIS ---
 try:
     SECRETS_HCM = st.secrets["hcm_api"]
+    SECRETS_PG = st.secrets["api_portal_gestor"]
+    
     HCM_USER = SECRETS_HCM["usuario"]
     HCM_PASS = SECRETS_HCM["senha"]
     HCM_HASH = SECRETS_HCM["hash_sessao"]
     HCM_UID_BROWSER = SECRETS_HCM["user_id_browser"]
     HCM_PROJECT = SECRETS_HCM.get("project_id", "750")
-except Exception as e:
-    st.error(f"⚠️ Erro Config HCM: {e}")
-    st.stop()
-
-# --- CREDENCIAIS PORTAL GESTOR ---
-try:
-    SECRETS_PG = st.secrets["api_portal_gestor"]
+    
     PG_TOKEN = SECRETS_PG["token_fixo"]
     PG_CD_OPERADOR = SECRETS_PG["cd_operador"]
     PG_NR_ORG = SECRETS_PG["nr_org"]
 except Exception as e:
-    st.error(f"⚠️ Erro Config Portal Gestor: {e}")
+    st.error(f"⚠️ Erro de Configuração (Secrets): {e}")
     st.stop()
 
 # ==============================================================================
-# 3. GESTÃO DE SESSÃO HCM
+# 3. CONVERSÃO SEGURA DE TIPOS (A "BLINDAGEM")
+# ==============================================================================
+def safe_int(val):
+    """Converte qualquer coisa para Inteiro. Se falhar, retorna 0."""
+    try:
+        if pd.isna(val): return 0
+        return int(float(val)) # float lida com "123.0"
+    except:
+        return 0
+
+def safe_str(val):
+    """Garante string limpa."""
+    if pd.isna(val): return ""
+    return str(val).strip()
+
+# ==============================================================================
+# 4. GESTÃO DE SESSÃO HCM
 # ==============================================================================
 def get_data_brasil():
     return datetime.now(pytz.timezone('America/Sao_Paulo'))
 
-def init_db_token():
-    conn = st.connection("postgres", type="sql")
+def init_db_token(conn):
     try:
         with conn.session as session:
             session.execute(text("""
@@ -61,7 +72,6 @@ def init_db_token():
             """))
             session.commit()
     except: pass
-    return conn
 
 def get_token_db(conn):
     try:
@@ -111,17 +121,18 @@ def login_hcm_novo():
     return None, None
 
 def obter_sessao_hcm():
-    conn = init_db_token()
+    conn = st.connection("postgres", type="sql")
+    init_db_token(conn)
     token, uid = get_token_db(conn)
     if token:
-        headers = {
-            "OAuth-Token": token, "OAuth-Hash": HCM_HASH, "User-Id": HCM_UID_BROWSER,
-            "OAuth-Project": HCM_PROJECT, "Content-Type": "application/json"
-        }
+        # Testa token
+        headers = {"OAuth-Token": token, "OAuth-Hash": HCM_HASH, "User-Id": HCM_UID_BROWSER, "OAuth-Project": HCM_PROJECT, "Content-Type": "application/json"}
         try:
             r = requests.post("https://hcm.teknisa.com/backend/index.php/getPessoa", headers=headers, json={"page":1,"itemsPerPage":1,"requestType":"FilterData"}, timeout=5)
             if r.status_code == 200: return token
         except: pass
+    
+    # Se falhou, login novo
     new_token, new_uid = login_hcm_novo()
     if new_token:
         save_token_db(conn, new_token, new_uid)
@@ -129,30 +140,27 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. BANCO DE DADOS - LÓGICA SIMPLIFICADA (INT/INT)
+# 5. BANCO DE DADOS - VALIDAÇÃO (O CORAÇÃO DO PROBLEMA)
 # ==============================================================================
 
-def save_validacao_db(conn, df_changes, periodo_int, usuario_responsavel):
-    """
-    Salva diretamente usando tipos nativos (INT).
-    """
+def salvar_validacoes(conn, df_changes, periodo_str, usuario):
+    """Salva no banco. Recebe Periodo como STRING e IDs como INT."""
     if df_changes.empty: return
     
-    user_safe = usuario_responsavel if usuario_responsavel else "Sistema"
+    usuario_safe = usuario if usuario else "Sistema"
     
     try:
         with conn.session as session:
             for index, row in df_changes.iterrows():
-                # Conversão explícita para Inteiro do Python
-                try:
-                    c_id = int(row['NRVINCULOM'])
-                    p_id = int(periodo_int)
-                except: continue # Se não conseguir converter ID ou Periodo, pula
+                # BLINDAGEM DE TIPO: Garante que ID é int e Periodo é str
+                colab_id = safe_int(row['NRVINCULOM'])
+                if colab_id == 0: continue # Pula ID inválido
 
                 proc_bool = bool(row['Procedente'])
-                snap_faltas = int(row.get('Qtd_Faltas', 0))
+                snap_faltas = safe_int(row.get('Qtd_Faltas', 0))
                 snap_horas = float(row.get('Total_Horas_Atraso', 0.0))
 
+                # Query SQL com ON CONFLICT (Upsert)
                 query = text("""
                     INSERT INTO "ValidacaoPonto" 
                     ("ColaboradorID", "Periodo", "Procedente", "DataVerificacao", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot")
@@ -167,46 +175,42 @@ def save_validacao_db(conn, df_changes, periodo_int, usuario_responsavel):
                 """)
                 
                 session.execute(query, {
-                    'cid': c_id,
-                    'per': p_id, # Enviando como INT para o banco
+                    'cid': colab_id,
+                    'per': str(periodo_str), 
                     'proc': proc_bool,
-                    'user': user_safe,
+                    'user': usuario_safe,
                     'sf': snap_faltas,
                     'sh': snap_horas
                 })
             session.commit()
-        st.toast(f"✅ Salvo com sucesso!", icon="💾")
+        st.toast(f"✅ {len(df_changes)} registros salvos no banco!", icon="💾")
     except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
+        st.error(f"Erro ao salvar no banco: {e}")
 
-def fetch_validacoes_dataframe(conn, periodo_int):
-    """
-    Busca as validações e retorna um DataFrame limpo para merge.
-    """
+def fetch_validacoes_ativo(conn, periodo_str):
+    """Busca validações SEM CACHE para garantir dados frescos."""
     try:
-        # Garante que o parametro seja int
-        p_id = int(periodo_int)
-        
         query = text('SELECT "ColaboradorID", "Procedente", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot" FROM "ValidacaoPonto" WHERE "Periodo" = :per')
-        # TTL=0 garante que não cacheie o resultado do banco
-        df = conn.query(query, params={'per': p_id}, ttl=0)
+        # TTL=0 é essencial aqui!
+        df = conn.query(query, params={'per': str(periodo_str)}, ttl=0)
         
         if not df.empty:
-            # Garante que o ID no dataframe seja int (para cruzar com a API depois)
-            df['ColaboradorID'] = pd.to_numeric(df['ColaboradorID'], errors='coerce').fillna(0).astype(int)
+            # BLINDAGEM: Converte ID do banco para INT para bater com a API
+            df['ColaboradorID'] = df['ColaboradorID'].apply(safe_int)
             return df
             
     except Exception as e:
-        # st.error(f"Erro DB: {e}") # Descomentar para debug
+        # st.error(f"Erro leitura DB: {e}") 
         pass
     
-    # Retorna vazio com as colunas certas para não quebrar o merge
+    # Retorna vazio se der erro ou não tiver dados
     return pd.DataFrame(columns=["ColaboradorID", "Procedente", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot"])
 
 @st.cache_data(ttl=600)
-def fetch_dados_supervisores_completo():
+def fetch_dados_supervisores():
     try:
         conn = st.connection("postgres", type="sql")
+        # Busca Supervisores
         q1 = """
         SELECT col."ColaboradorID" as "Matricula", s."NomeSupervisor" as "Supervisor"
         FROM "Colaboradores" col
@@ -217,11 +221,12 @@ def fetch_dados_supervisores_completo():
         df_map = conn.query(q1)
         mapa_sup = {}
         if not df_map.empty:
-            # Converte para int
-            df_map['Matricula'] = pd.to_numeric(df_map['Matricula'], errors='coerce').fillna(0).astype(int)
+            # BLINDAGEM: ID vira INT
+            df_map['Matricula'] = df_map['Matricula'].apply(safe_int)
             df_map['Supervisor'] = df_map['Supervisor'].str.strip().str.upper()
             mapa_sup = dict(zip(df_map['Matricula'], df_map['Supervisor']))
 
+        # Busca Celulares
         q2 = 'SELECT "NomeSupervisor", "Celular" FROM "Supervisores"'
         df_tel = conn.query(q2)
         mapa_tel = {}
@@ -231,41 +236,30 @@ def fetch_dados_supervisores_completo():
                 df_tel['Celular']
             ))
         return mapa_sup, mapa_tel
-    except Exception as e:
+    except:
         return {}, {}
 
 # ==============================================================================
-# 5. API FERIADOS & HELPERS
+# 6. APIs GERAIS
 # ==============================================================================
 @st.cache_data(ttl=86400)
 def fetch_feriados_brasil(ano):
-    url = f"https://brasilapi.com.br/api/feriados/v1/{ano}"
     try:
-        r = requests.get(url, timeout=5)
+        r = requests.get(f"https://brasilapi.com.br/api/feriados/v1/{ano}", timeout=5)
         if r.status_code == 200: return r.json() 
     except: pass
     return []
 
 def get_feriados_set(anos_lista):
-    feriados_dict = {}
+    feriados = {}
     if not anos_lista: anos_lista = [datetime.now().year]
     for ano in anos_lista:
         dados = fetch_feriados_brasil(ano)
         if dados:
-            for f in dados: feriados_dict[f['date']] = f['name']
+            for f in dados: feriados[f['date']] = f['name']
         else:
-            feriados_dict.update({
-                f"{ano}-01-01": "Confraternização Universal",
-                f"{ano}-04-21": "Tiradentes",
-                f"{ano}-05-01": "Dia do Trabalho",
-                f"{ano}-09-07": "Independência do Brasil",
-                f"{ano}-10-12": "Nossa Senhora Aparecida",
-                f"{ano}-11-02": "Finados",
-                f"{ano}-11-15": "Proclamação da República",
-                f"{ano}-11-20": "Dia da Consciência Negra",
-                f"{ano}-12-25": "Natal"
-            })
-    return feriados_dict
+            feriados.update({f"{ano}-01-01": "Confraternização", f"{ano}-12-25": "Natal"})
+    return feriados
 
 def decimal_para_hora(val):
     try:
@@ -281,7 +275,7 @@ def gerar_link_whatsapp(telefone, mensagem):
     return f"https://api.whatsapp.com/send?phone=55{fone_limpo}&text={texto_encoded}"
 
 # ==============================================================================
-# 6. API PORTAL GESTOR & HCM
+# 7. APIs GESTOR
 # ==============================================================================
 @st.cache_data(ttl=3600)
 def fetch_estruturas_gestor():
@@ -291,8 +285,7 @@ def fetch_estruturas_gestor():
     try:
         r = requests.get(url, params=params, headers=headers, timeout=15)
         if r.status_code == 200:
-            data = r.json()
-            items = (data.get("dataset", {}) or {}).get("data", [])
+            items = r.json().get("dataset", {}).get("data", [])
             return [(i.get("NMESTRUTURA", "Sem Nome"), i.get("NRESTRUTURAM")) for i in items]
     except: pass
     return []
@@ -309,12 +302,8 @@ def fetch_ids_portal_gestor(data_ref, codigo_estrutura):
         if r.status_code == 200:
             data = r.json()
             if "dataset" in data and "data" in data["dataset"]:
-                df = pd.DataFrame(data["dataset"]["data"])
-                if not df.empty and 'NMSITUFUNCH' in df.columns:
-                    df = df[df['NMSITUFUNCH'].str.strip() == 'Atividade Normal']
-                return df
-    except Exception as e:
-        st.error(f"Erro Portal Gestor: {e}")
+                return pd.DataFrame(data["dataset"]["data"])
+    except: pass
     return pd.DataFrame()
 
 @st.cache_data(ttl=3600) 
@@ -325,9 +314,8 @@ def fetch_periodos_apuracao():
     try:
         r = requests.get(url, params=params, headers=headers, timeout=10)
         if r.status_code == 200:
-            data = r.json()
-            if "dataset" in data and "data" in data["dataset"]:
-                return pd.DataFrame(data["dataset"]["data"])
+            data = r.json().get("dataset", {}).get("data", [])
+            return pd.DataFrame(data)
     except: pass
     return pd.DataFrame()
 
@@ -335,9 +323,7 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
     url = "https://hcm.teknisa.com/backend/index.php/getMarcacaoPontoOcorrencias"
     headers = {
         "User-Agent": "Mozilla/5.0", "Content-Type": "application/json",
-        "OAuth-Token": token, "OAuth-Hash": HCM_HASH,
-        "OAuth-Project": HCM_PROJECT, "User-Id": HCM_UID_BROWSER,
-        "OAuth-KeepConnected": "Yes"
+        "OAuth-Token": token, "OAuth-Hash": HCM_HASH, "OAuth-Project": HCM_PROJECT, "User-Id": HCM_UID_BROWSER, "OAuth-KeepConnected": "Yes"
     }
     payload = {
         "disableLoader": False,
@@ -354,111 +340,54 @@ def fetch_ocorrencias_hcm_turbo(token, lista_ids, periodo_apuracao, mes_competen
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=80)
         if r.status_code == 200:
-            data = r.json()
-            if "dataset" in data and "getMarcacaoPontoOcorrencias" in data["dataset"]:
-                return pd.DataFrame(data["dataset"]["getMarcacaoPontoOcorrencias"])
-    except Exception as e:
-        st.error(f"Erro na requisição: {e}")
-    return pd.DataFrame()
-
-# ==============================================================================
-# 7. MODAIS E DIALOGS
-# ==============================================================================
-@st.cache_data(ttl=300)
-def fetch_dias_demonstrativo(vinculo, periodo):
-    url = "https://portalgestor.teknisa.com/backend/index.php/getDiasDemonstrativo"
-    params = {
-        "requestType": "FilterData", "NRVINCULOM": str(vinculo).split('.')[0],
-        "NRPERIODOAPURACAO": periodo, "NRORG": PG_NR_ORG, "CDOPERADOR": PG_CD_OPERADOR
-    }
-    headers = { "OAuth-Token": PG_TOKEN, "OAuth-Cdoperador": PG_CD_OPERADOR, "OAuth-Nrorg": PG_NR_ORG }
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=15)
-        if r.status_code == 200:
-            items = r.json().get("dataset", {}).get("data", [])
-            return pd.DataFrame(items)
+            return pd.DataFrame(r.json().get("dataset", {}).get("getMarcacaoPontoOcorrencias", []))
     except: pass
     return pd.DataFrame()
 
-@st.dialog("📅 Espelho de Ponto", width="large")
-def mostrar_espelho_modal(nome, vinculo, periodo):
-    st.write(f"**{nome}** (Matrícula: {vinculo})")
-    with st.spinner("Buscando dados..."):
-        df = fetch_dias_demonstrativo(vinculo, periodo)
-    if not df.empty:
-        cols_order = [c for c in ['DTAPURACAO', 'DSPONTODIA', 'ENTRADA_SAIDA_1', 'ENTRADA_SAIDA_2'] if c in df.columns]
-        other_cols = [c for c in df.columns if c not in cols_order]
-        st.dataframe(df[cols_order + other_cols], use_container_width=True, hide_index=True)
-    else:
-        st.warning("Sem dados detalhados.")
-
-@st.dialog("📢 Disparar Alertas de Ponto", width="large")
+@st.dialog("📢 Disparar Alertas", width="large")
 def dialog_alertas_ponto(df_resumo, mapa_tel, periodo):
-    st.caption(f"Envio de cobrança sobre Faltas e Atrasos (Período: {periodo})")
-    
-    # Filtra: Só exibe quem tem Score > 0 e NÃO foi validado
+    st.caption(f"Alertas de Ponto - Período {periodo}")
     df_probs = df_resumo[(df_resumo['ScoreNum'] > 0) & (df_resumo['Procedente'] == False)].copy()
-
+    
     if df_probs.empty:
-        st.success("Tudo validado ou sem ocorrências! Nenhuma cobrança pendente.")
+        st.success("Nada pendente!")
         return
 
     supervisores = sorted(df_probs['Supervisor'].unique())
-
     for sup in supervisores:
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
-            
             df_sup = df_probs[df_probs['Supervisor'] == sup]
-            total_f = df_sup['Qtd_Faltas'].sum()
-            total_h = df_sup['Total_Horas_Atraso'].sum() 
             
-            # Monta Mensagem
-            msg_lines = [f"Ola *{sup}*, verificacao de ponto ({periodo}):"]
-            msg_lines.append("")
-            
+            msg = [f"Ola *{sup}*, verificacao de ponto ({periodo}):\n"]
             for _, row in df_sup.iterrows():
-                detalhes = []
-                if row['Qtd_Faltas'] > 0: detalhes.append(f"{row['Qtd_Faltas']} Faltas")
-                if row['Total_Horas_Atraso'] > 0: detalhes.append(f"{decimal_para_hora(row['Total_Horas_Atraso'])}h Atraso")
-                
-                if detalhes:
-                    msg_lines.append(f"👤 *{row['Funcionario']}*")
-                    msg_lines.append(f"⚠️ {', '.join(detalhes)}")
-                    if row['Datas']: msg_lines.append(f"📅 Dias: {row['Datas']}")
-                    msg_lines.append("")
+                probs = []
+                if row['Qtd_Faltas'] > 0: probs.append(f"{row['Qtd_Faltas']} Faltas")
+                if row['Total_Horas_Atraso'] > 0: probs.append(f"{decimal_para_hora(row['Total_Horas_Atraso'])}h Atraso")
+                msg.append(f"👤 *{row['Funcionario']}*: {', '.join(probs)}")
             
-            msg_lines.append("Por favor, verificar se procede.")
-            msg_final = "\n".join(msg_lines)
-
+            msg.append("\nPor favor, verificar se procede.")
+            msg_final = "\n".join(msg)
             tel = mapa_tel.get(sup)
-
-            with c1:
-                st.markdown(f"**👤 {sup}**")
-                st.caption(f"Pendências: {len(df_sup)} colaboradores")
-                with st.expander("Ver mensagem"):
-                    st.text(msg_final)
             
+            with c1:
+                st.markdown(f"**{sup}** ({len(df_sup)} pendências)")
             with c2:
                 if tel:
-                    link = gerar_link_whatsapp(tel, msg_final)
-                    st.link_button("📲 Enviar", link, use_container_width=True) # Botão padrão (secondary)
+                    st.link_button("📲 Enviar", gerar_link_whatsapp(tel, msg_final), use_container_width=True)
                 else:
-                    st.warning("Sem Celular")
+                    st.warning("Sem nº")
 
 # ==============================================================================
-# 8. LÓGICA PRINCIPAL (UI)
+# 8. UI PRINCIPAL
 # ==============================================================================
-
 st.title("⚡ Diagnóstico de Ponto (Criticidade)")
-st.caption("Visão unificada de Faltas, Atrasos e Validações.")
 
 if "busca_realizada" not in st.session_state: st.session_state["busca_realizada"] = False
 if "dados_cache" not in st.session_state: st.session_state["dados_cache"] = {}
 
 with st.sidebar:
     st.header("Parâmetros")
-    
     est_opcoes = fetch_estruturas_gestor()
     est_id = "101091998"
     if est_opcoes:
@@ -468,25 +397,20 @@ with st.sidebar:
     st.divider()
     
     df_per = fetch_periodos_apuracao()
-    per_id_default = 1904
+    per_id_default = "1904"
     comp_sug = datetime.now().replace(day=1).strftime("%d/%m/%Y")
     
     if not df_per.empty:
         opcao = st.selectbox("Período:", df_per['DSPERIODOAPURACAO'])
         row = df_per[df_per['DSPERIODOAPURACAO'] == opcao].iloc[0]
-        per_id_default = row['NRPERIODOAPURACAO']
-        try:
-            comp_sug = datetime.strptime(row['DTINICIALAPURACAO'], "%d/%m/%Y").replace(day=1).strftime("%d/%m/%Y")
-        except: pass
+        per_id_default = str(row['NRPERIODOAPURACAO'])
     
-    # INPUT AGORA É NÚMERO (INT)
-    per_id = st.number_input("Cód. Período", value=int(per_id_default), step=1)
-
+    # Campo TEXTO para garantir que não haja conversão automática
+    per_id = st.text_input("Cód. Período", value=per_id_default)
     mes_hcm = st.text_input("Mês Comp. (HCM)", value=comp_sug)
     data_ref = st.date_input("Data Ref. Ativos", datetime.now())
     
     filtro_sup_sidebar = []
-    # Verifica cache de supervisores
     if st.session_state.get("busca_realizada") and "mapa_sup" in st.session_state["dados_cache"]:
         mapa = st.session_state["dados_cache"]["mapa_sup"]
         if mapa:
@@ -499,26 +423,24 @@ with st.sidebar:
         st.session_state["dados_cache"] = {} 
         st.rerun()
 
-# --- EXECUÇÃO ---
+# --- LÓGICA DE CARREGAMENTO E MESTRAGEM ---
 if st.session_state["busca_realizada"]:
     
-    # 1. BUSCA PESADA (API + DADOS GERAIS) - SÓ RODA SE NÃO TIVER CACHE
+    # 1. BUSCA PESADA (API) - COM CACHE
     if not st.session_state["dados_cache"]:
-        with st.status("🔄 Buscando dados iniciais...", expanded=True) as status:
+        with st.status("🔄 Buscando dados APIs...", expanded=True) as status:
             df_func = fetch_ids_portal_gestor(data_ref, est_id)
             if df_func.empty:
                 status.update(label="❌ Sem funcionários.", state="error")
                 st.session_state["busca_realizada"] = False; st.stop()
             
-            mapa_supervisores, mapa_telefones = fetch_dados_supervisores_completo()
-            
-            if 'NMESTRUTGEREN' not in df_func.columns: df_func['NMESTRUTGEREN'] = "GERAL"
+            mapa_supervisores, mapa_telefones = fetch_dados_supervisores()
             
             lista_ids = df_func['NRVINCULOM'].dropna().astype(int).unique().tolist()
             token = obter_sessao_hcm()
             if not token:
                 status.update(label="❌ Erro Login HCM.", state="error")
-                st.session_state["busca_realizada"] = False; st.stop()
+                st.stop()
                 
             df_oco = fetch_ocorrencias_hcm_turbo(token, lista_ids, per_id, mes_hcm)
             
@@ -531,208 +453,135 @@ if st.session_state["busca_realizada"]:
             }
             status.update(label="Pronto!", state="complete", expanded=False)
             
-    # 2. BUSCA DE VALIDAÇÕES (SEMPRE ATUALIZADA DO BANCO)
+    # 2. BUSCA DO BANCO (SEM CACHE - SEMPRE ATUAL)
     conn = st.connection("postgres", type="sql")
-    
-    # Busca e cria o DF de validações
-    # Chave de cruzamento: ColaboradorID (int)
-    df_validacoes_db = fetch_validacoes_dataframe(conn, st.session_state["dados_cache"]["periodo"])
+    # Busca a tabela ValidacaoPonto fresquinha
+    df_validacoes_db = fetch_validacoes_ativo(conn, st.session_state["dados_cache"]["periodo"])
 
-    # 3. RECUPERAÇÃO E PROCESSAMENTO
+    # 3. UNIFICAÇÃO
     df_func = st.session_state["dados_cache"]["funcionarios"].copy()
     df_oco = st.session_state["dados_cache"]["ocorrencias"].copy()
-    per_cache = st.session_state["dados_cache"]["periodo"]
     mapa_sup = st.session_state["dados_cache"]["mapa_sup"]
-    mapa_tel = st.session_state["dados_cache"]["mapa_tel"]
     
-    # --- APLICAÇÃO DOS MAPAS ---
-    # CONVERTE ID PARA INT EM TUDO
-    df_func['NRVINCULOM'] = pd.to_numeric(df_func['NRVINCULOM'], errors='coerce').fillna(0).astype(int)
+    # Normalização de IDs (INT)
+    df_func['NRVINCULOM'] = df_func['NRVINCULOM'].apply(safe_int)
+    if not df_oco.empty: df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(safe_int)
     
     df_func['Supervisor'] = df_func['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
-    mapa_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
     
-    # --- FILTRO DE SUPERVISOR ---
+    # Filtro Supervisor
     if filtro_sup_sidebar:
         df_func = df_func[df_func['Supervisor'].isin(filtro_sup_sidebar)]
-        valid_ids = df_func['NRVINCULOM'].unique()
-        if not df_oco.empty:
-            df_oco['NRVINCULOM'] = pd.to_numeric(df_oco['NRVINCULOM'], errors='coerce').fillna(0).astype(int)
-            df_oco = df_oco[df_oco['NRVINCULOM'].isin(valid_ids)]
+        if not df_oco.empty: df_oco = df_oco[df_oco['NRVINCULOM'].isin(df_func['NRVINCULOM'])]
 
-    # 4. CRIAÇÃO DA TABELA MESTRA
+    # Monta Mestra
     hoje = datetime.now().strftime('%Y-%m-%d')
     df_mestra = df_func[['NRVINCULOM', 'NMVINCULOM', 'Supervisor']].rename(columns={'NMVINCULOM':'Funcionario'}).copy()
     
     if not df_oco.empty:
         df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
-        df_oco['NRVINCULOM'] = pd.to_numeric(df_oco['NRVINCULOM'], errors='coerce').fillna(0).astype(int)
-        df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
         df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
-
-        # Filtros de Data
-        df_oco = df_oco[df_oco['DATA_INICIO_FILTER'] != hoje].copy()
+        # Remove hoje
+        df_oco = df_oco[df_oco['DATA_INICIO_FILTER'].astype(str) != hoje].copy()
+        
+        # Filtros dias uteis
         df_oco['DT_OBJ'] = pd.to_datetime(df_oco['DATA_INICIO_FILTER'], errors='coerce')
-        
-        anos = df_oco['DT_OBJ'].dt.year.unique().tolist()
-        feriados = get_feriados_set(anos)
-        
-        df_oco['DIA_SEMANA'] = df_oco['DT_OBJ'].dt.dayofweek 
+        feriados = get_feriados_set(df_oco['DT_OBJ'].dt.year.unique().tolist())
         df_oco['IS_FERIADO'] = df_oco['DATA_INICIO_FILTER'].map(lambda x: x in feriados)
         
-        df_faltas = df_oco[
-            (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
-            (df_oco['DIA_SEMANA'] < 5) & (df_oco['IS_FERIADO'] == False)
-        ].copy()
+        df_faltas = df_oco[(df_oco['TIPO_OCORRENCIA'] == 'FALTA') & (df_oco['DT_OBJ'].dt.dayofweek < 5) & (~df_oco['IS_FERIADO'])]
+        df_atrasos = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO']
         
-        df_atrasos = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
-
-        s_faltas = df_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+        s_faltas = df_faltas.groupby('NRVINCULOM').size().rename('Qtd_Faltas')
         s_atrasos = df_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
         s_datas = df_oco.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
-
-        df_mestra = df_mestra.set_index('NRVINCULOM')
-        df_mestra = df_mestra.join(s_faltas).join(s_atrasos).join(s_datas).fillna(0).reset_index()
+        
+        df_mestra = df_mestra.set_index('NRVINCULOM').join(s_faltas).join(s_atrasos).join(s_datas).fillna(0).reset_index()
     else:
-        df_mestra['Qtd_Faltas'] = 0
-        df_mestra['Total_Horas_Atraso'] = 0.0
-        df_mestra['Datas'] = ""
+        df_mestra['Qtd_Faltas'] = 0; df_mestra['Total_Horas_Atraso'] = 0; df_mestra['Datas'] = ""
 
-    # CÁLCULO DE CRITICIDADE (0 a 10)
+    # Score
     df_mestra['ScoreNum'] = (df_mestra['Qtd_Faltas'] * 10) + (df_mestra['Total_Horas_Atraso'] / 8.0 * 5)
     df_mestra['ScoreNum'] = df_mestra['ScoreNum'].apply(lambda x: 10 if x > 10 else x)
-    
-    def fmt_score(val):
-        if val == 0: return "OK"
-        return f"{val:.1f}"
-    
-    df_mestra['Criticidade Ponto'] = df_mestra['ScoreNum'].apply(fmt_score)
+    df_mestra['Criticidade Ponto'] = df_mestra['ScoreNum'].apply(lambda x: "OK" if x == 0 else f"{x:.1f}")
 
-    # 5. MAPEAMENTO DO BANCO DE DADOS - VIA MERGE (MAIS SEGURO)
-    # df_mestra['NRVINCULOM'] é int. df_validacoes_db['ColaboradorID'] é int.
-    df_merged = pd.merge(df_mestra, df_validacoes_db, left_on='NRVINCULOM', right_on='ColaboradorID', how='left')
+    # =========================================================================
+    # MERGE COM O BANCO DE DADOS (CRUZAMENTO INT -> INT)
+    # =========================================================================
+    # df_mestra['NRVINCULOM'] já é int (safe_int). 
+    # df_validacoes_db['ColaboradorID'] já é int (safe_int).
     
-    # Preenche vazios
-    df_merged['Procedente'] = df_merged['Procedente'].fillna(False)
-    df_merged['UsuarioResponsavel'] = df_merged['UsuarioResponsavel'].fillna("-")
+    df_final = pd.merge(df_mestra, df_validacoes_db, left_on='NRVINCULOM', right_on='ColaboradorID', how='left')
     
-    # Monta texto do Snapshot
-    def criar_texto_snapshot(row):
-        f = int(row['QtdFaltasSnapshot']) if pd.notnull(row['QtdFaltasSnapshot']) else 0
+    df_final['Procedente'] = df_final['Procedente'].fillna(False)
+    df_final['UsuarioResponsavel'] = df_final['UsuarioResponsavel'].fillna("-")
+    
+    def fmt_snap(row):
+        f = safe_int(row['QtdFaltasSnapshot'])
         h = float(row['HorasAtrasoSnapshot']) if pd.notnull(row['HorasAtrasoSnapshot']) else 0.0
-        if f == 0 and h == 0: return "-"
-        return f"{f} Faltas | {decimal_para_hora(h)}h"
+        return f"{f} Faltas | {decimal_para_hora(h)}h" if (f>0 or h>0) else "-"
+        
+    df_final['UltimaValidacao'] = df_final.apply(fmt_snap, axis=1)
+    df_final['Tempo_Atraso_Fmt'] = df_final['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-    df_merged['UltimaValidacao'] = df_merged.apply(criar_texto_snapshot, axis=1)
-    
-    # Renomeia para UI
-    df_merged['ValidadoPor'] = df_merged['UsuarioResponsavel']
-    df_merged['Tempo_Atraso_Fmt'] = df_merged['Total_Horas_Atraso'].apply(decimal_para_hora)
-
-    # KPIs
+    # 4. EXIBIÇÃO
     c1, c2, c3, c4 = st.columns(4)
-    total_colab = len(df_merged)
-    
-    df_ok = df_merged[(df_merged['ScoreNum'] == 0) | (df_merged['Procedente'] == True)]
-    df_critico = df_merged[(df_merged['ScoreNum'] > 0) & (df_merged['Procedente'] == False)]
-    
-    c1.metric("Total Colaboradores", total_colab)
-    c2.metric("✅ Validados / OK", len(df_ok))
-    c3.metric("⚠️ Pendentes / Críticos", len(df_critico), delta_color="inverse")
-    c4.metric("Índice Risco", f"{df_critico['ScoreNum'].mean():.1f}" if not df_critico.empty else "0.0", help="Média do score dos pendentes")
+    df_pendente = df_final[(df_final['ScoreNum'] > 0) & (df_final['Procedente'] == False)]
+    c1.metric("Total Colaboradores", len(df_final))
+    c2.metric("✅ Resolvidos/Ok", len(df_final) - len(df_pendente))
+    c3.metric("⚠️ Pendentes", len(df_pendente), delta_color="inverse")
+    c4.metric("Índice Risco", f"{df_pendente['ScoreNum'].mean():.1f}" if not df_pendente.empty else "0.0")
 
-    # BOTÃO ALERTAS
     st.divider()
     c_alert, _ = st.columns([1, 4])
     with c_alert:
         if st.button("📢 Central de Alertas", use_container_width=True):
-            dialog_alertas_ponto(df_merged, mapa_tel, per_cache)
+            dialog_alertas_ponto(df_final, st.session_state["dados_cache"]["mapa_tel"], per_id)
 
-    # GRÁFICO EMPILHADO (AZUL E VERMELHO)
-    st.subheader("📊 Status da Equipe por Supervisor")
-    
-    def categorizar_simples(row):
-        if row['ScoreNum'] == 0 or row['Procedente']: 
-            return "Resolvido/Ok"
-        return "Pendência"
-    
-    df_merged['StatusGrafico'] = df_merged.apply(categorizar_simples, axis=1)
-    
-    df_chart = df_merged.groupby(['Supervisor', 'StatusGrafico']).size().reset_index(name='Qtd')
-    
-    color_map = {
-        "Resolvido/Ok": "#007bff", # Azul
-        "Pendência": "#dc3545"     # Vermelho
-    }
-    
-    fig = px.bar(
-        df_chart, 
-        x='Supervisor', 
-        y='Qtd', 
-        color='StatusGrafico',
-        color_discrete_map=color_map,
-        title="Pendências vs Resolvidos",
-        text_auto=True
-    )
+    # GRÁFICO
+    df_final['StatusGrafico'] = df_final.apply(lambda x: "Pendência" if (x['ScoreNum'] > 0 and not x['Procedente']) else "Resolvido/Ok", axis=1)
+    df_chart = df_final.groupby(['Supervisor', 'StatusGrafico']).size().reset_index(name='Qtd')
+    fig = px.bar(df_chart, x='Supervisor', y='Qtd', color='StatusGrafico', color_discrete_map={"Resolvido/Ok": "#007bff", "Pendência": "#dc3545"}, text_auto=True)
     st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
-
-    # TABELA UNIFICADA
+    # TABELA EDITOR
     st.subheader("📋 Painel de Controle Unificado")
-    st.caption("Ordenado por criticidade. Use a caixa 'Ok?' para validar as pendências.")
-
-    df_show = df_merged.sort_values(by=['ScoreNum'], ascending=False).copy()
+    df_show = df_final.sort_values(by=['ScoreNum'], ascending=False).copy()
     
-    with st.form("form_painel"):
+    with st.form("painel_validacao"):
         edited_df = st.data_editor(
             df_show[[
-                'Procedente', 
-                'Criticidade Ponto', 
-                'Qtd_Faltas', 
-                'Tempo_Atraso_Fmt', 
-                'Funcionario', 
-                'NRVINCULOM', 
-                'ValidadoPor', 
-                'UltimaValidacao',
-                'Datas',
-                'Total_Horas_Atraso', # Hidden
-                'ScoreNum' # Hidden
+                'Procedente', 'Criticidade Ponto', 'Qtd_Faltas', 'Tempo_Atraso_Fmt', 
+                'Funcionario', 'NRVINCULOM', 'UsuarioResponsavel', 'UltimaValidacao', 
+                'Datas', 'Total_Horas_Atraso', 'ScoreNum'
             ]],
-            use_container_width=True,
-            hide_index=True,
+            use_container_width=True, hide_index=True,
             column_config={
-                "Procedente": st.column_config.CheckboxColumn("Ok?", help="Marque para validar", default=False),
-                "Criticidade Ponto": st.column_config.TextColumn("Criticidade", help="10 = Crítico (Falta). OK = Sem problemas."),
+                "Procedente": st.column_config.CheckboxColumn("Ok?", default=False),
+                "Criticidade Ponto": st.column_config.TextColumn("Criticidade"),
                 "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
-                "Tempo_Atraso_Fmt": st.column_config.TextColumn("Atrasos"),
-                "Funcionario": st.column_config.TextColumn("Colaborador", width="medium"),
                 "NRVINCULOM": st.column_config.TextColumn("Matrícula", disabled=True),
-                "ValidadoPor": st.column_config.TextColumn("Validado Por", disabled=True),
+                "UsuarioResponsavel": st.column_config.TextColumn("Validado Por", disabled=True),
                 "UltimaValidacao": st.column_config.TextColumn("Snapshot", disabled=True),
-                "Datas": st.column_config.TextColumn("Detalhe Datas", width="large"),
-                "Total_Horas_Atraso": None,
-                "ScoreNum": None
+                "Datas": st.column_config.TextColumn("Detalhe", width="large"),
+                "Total_Horas_Atraso": None, "ScoreNum": None
             },
             key="editor_painel"
         )
         
         if st.form_submit_button("💾 Salvar Alterações"):
-            dict_changes = st.session_state.get("editor_painel", {}).get("edited_rows", {})
-            
-            if not dict_changes:
-                st.info("Nenhuma alteração para salvar.")
+            # Detecta mudanças
+            changes = st.session_state.get("editor_painel", {}).get("edited_rows", {})
+            if not changes:
+                st.info("Nada alterado.")
             else:
-                indices_modificados = list(dict_changes.keys())
-                df_to_save = edited_df.iloc[indices_modificados].copy()
-                
+                rows_to_save = edited_df.iloc[list(changes.keys())].copy()
                 conn = st.connection("postgres", type="sql")
-                usuario_atual = st.session_state.get("name", "Usuario Desconhecido")
+                user_now = st.session_state.get("name", "Usuario Desconhecido")
                 
-                # Salva usando INTEIROS explicitos
-                save_validacao_db(conn, df_to_save, per_cache, usuario_atual)
+                # Salva usando INT ID e STRING Periodo (Conforme o banco novo)
+                salvar_validacoes(conn, rows_to_save, per_id, user_now)
                 st.rerun()
 
-    # DOWNLOAD
-    csv = df_merged.to_csv(index=False, sep=';', encoding='utf-8-sig')
-    st.download_button("📥 Baixar Relatório Completo", csv, f"relatorio_diagnostico_{per_cache}.csv", "text/csv")
+    csv = df_final.to_csv(index=False, sep=';', encoding='utf-8-sig')
+    st.download_button("📥 Baixar Relatório", csv, f"relatorio_{per_id}.csv", "text/csv")
