@@ -129,13 +129,12 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT
+# 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT (CORRIGIDO)
 # ==============================================================================
 def clean_id(val):
     """
     Padroniza ID para string numérica pura.
     Remove .0, espaços e converte float/int para str.
-    Essencial para o match do banco funcionar.
     """
     try:
         if pd.isna(val): return "0"
@@ -155,7 +154,6 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
         with conn.session as session:
             for index, row in df_changes.iterrows():
                 try:
-                    # O ID no banco é BigInt, garantimos conversão correta
                     colab_id = int(float(row['NRVINCULOM']))
                 except: continue
 
@@ -190,35 +188,54 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
         st.error(f"Erro ao salvar: {e}")
 
 def fetch_validacoes_completo(conn, periodo):
-    """Busca Validação, Usuário e Snapshot anterior"""
+    """
+    Busca Validação, Usuário e Snapshot anterior.
+    CORREÇÃO APLICADA: Normalização de colunas para UpperCase.
+    """
     try:
-        query = text('SELECT "ColaboradorID", "Procedente", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot" FROM "ValidacaoPonto" WHERE "Periodo" = :per')
-        df = conn.query(query, params={'per': str(periodo)}, ttl=0)
+        # Query sem text() em volta para evitar problemas com alguns drivers, mas parametrizada
+        q = 'SELECT "ColaboradorID", "Procedente", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot" FROM "ValidacaoPonto" WHERE "Periodo" = :per'
+        
+        df = conn.query(q, params={'per': str(periodo)}, ttl=0)
         
         if not df.empty:
-            # AQUI ESTÁ O TRUQUE: Padroniza o ID que vem do banco para STRING
-            # para bater com o dataframe do Pandas
-            df['ColaboradorID'] = df['ColaboradorID'].apply(clean_id)
+            # --- CORREÇÃO: Padroniza colunas para MAIÚSCULO ---
+            df.columns = df.columns.str.upper()
             
-            def format_snap(row):
-                f = int(row['QtdFaltasSnapshot']) if pd.notnull(row['QtdFaltasSnapshot']) else 0
-                h = float(row['HorasAtrasoSnapshot']) if pd.notnull(row['HorasAtrasoSnapshot']) else 0.0
-                if f == 0 and h == 0: return "-"
-                h_fmt = decimal_para_hora(h)
-                return f"{f} Faltas | {h_fmt}h"
+            # Garante que usamos a coluna certa, independente se veio 'colaboradorid' ou 'ColaboradorID'
+            if 'COLABORADORID' in df.columns:
+                df['COLABORADORID'] = df['COLABORADORID'].apply(clean_id)
+                
+                def format_snap(row):
+                    # Acessa colunas em Maiúsculo
+                    f = int(row['QTDFALTASSNAPSHOT']) if pd.notnull(row['QTDFALTASSNAPSHOT']) else 0
+                    h = float(row['HORASATRASOSNAPSHOT']) if pd.notnull(row['HORASATRASOSNAPSHOT']) else 0.0
+                    if f == 0 and h == 0: return "-"
+                    h_fmt = decimal_para_hora(h)
+                    return f"{f} Faltas | {h_fmt}h"
 
-            df['SnapshotTexto'] = df.apply(format_snap, axis=1)
+                df['SnapshotTexto'] = df.apply(format_snap, axis=1)
 
-            # Cria dicionários mapeados pela String do ID
-            d_proc = dict(zip(df['ColaboradorID'], df['Procedente']))
-            d_user = dict(zip(df['ColaboradorID'], df['UsuarioResponsavel']))
-            d_snap = dict(zip(df['ColaboradorID'], df['SnapshotTexto']))
-            
-            return d_proc, d_user, d_snap
+                # Cria dicionários usando as colunas padronizadas
+                d_proc = dict(zip(df['COLABORADORID'], df['PROCEDENTE']))
+                
+                # UsuarioResponsavel pode vir nulo, trata com get
+                if 'USUARIORESPONSAVEL' in df.columns:
+                    d_user = dict(zip(df['COLABORADORID'], df['USUARIORESPONSAVEL']))
+                else:
+                    d_user = {}
+
+                d_snap = dict(zip(df['COLABORADORID'], df['SnapshotTexto']))
+                
+                return d_proc, d_user, d_snap
+            else:
+                # Se mesmo com upper não achar, mostra erro
+                st.error(f"Colunas retornadas do BD: {list(df.columns)}. Esperado: COLABORADORID")
+                return {}, {}, {}
             
     except Exception as e: 
-        print(f"Erro fetch: {e}")
-        pass
+        st.error(f"Erro ao buscar validações no banco: {e}")
+    
     return {}, {}, {}
 
 @st.cache_data(ttl=600)
