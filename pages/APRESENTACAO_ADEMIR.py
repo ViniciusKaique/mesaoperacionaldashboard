@@ -124,7 +124,7 @@ def render_capa():
         st.markdown("<h1 class='big-title'>BLINDAGEM DE CONTRATO</h1>", unsafe_allow_html=True)
         st.markdown("<p class='subtitle'>MESA OPERACIONAL | INTELIGÊNCIA ESTRATÉGICA</p>", unsafe_allow_html=True)
         st.markdown("<br><hr style='border-color: #334155'><br>", unsafe_allow_html=True)
-        st.markdown("<h3 style='color: #94a3b8'>De: <span class='highlight-red'>Reativo</span> (Apaga Incêndio) ➔ Para: <span class='highlight-green'>Preditivo</span> (Evita o Fogo)</h3>", unsafe_allow_html=True)
+        st.markdown("<h3 style='color: #94a3b8'>De: <span class='highlight-red'>Reativo</span> (Apaga Incêndio) ➔ Para: <span class='highlight-green'>Preditivo</span> (Evita o Incêndio)</h3>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
 # --- SLIDE 1: O PILOTO ---
@@ -287,7 +287,7 @@ def render_roadmap():
         st.markdown("""
         <div class='card-box'>
             <p style='color: #e2e8f0; font-size: 1.1rem;'>
-            Não fazemos nada sozinhos. A liderança do <b>Sr. Aparício</b> e o engajamento da equipe operacional são vitais.
+            Não fazemos nada sozinhos. A gestão do <b>Sr. Aparício</b> e o engajamento da equipe operacional são vitais.
             <br><br>
             <i>"Eles não tinham ferramentas. Agora eles têm um arsenal."</i>
             </p>
