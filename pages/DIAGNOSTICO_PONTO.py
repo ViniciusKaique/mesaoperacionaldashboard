@@ -129,13 +129,9 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT (CORRIGIDO)
+# 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT
 # ==============================================================================
 def clean_id(val):
-    """
-    Padroniza ID para string numérica pura.
-    Remove .0, espaços e converte float/int para str.
-    """
     try:
         if pd.isna(val): return "0"
         return str(int(float(val)))
@@ -143,13 +139,8 @@ def clean_id(val):
         return str(val).strip()
 
 def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel):
-    """
-    Salva validação + Quem validou + Snapshot
-    """
     if df_changes.empty: return
-    
     user_safe = usuario_responsavel if usuario_responsavel else "Sistema"
-    
     try:
         with conn.session as session:
             for index, row in df_changes.iterrows():
@@ -173,7 +164,6 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
                         "QtdFaltasSnapshot" = EXCLUDED."QtdFaltasSnapshot",
                         "HorasAtrasoSnapshot" = EXCLUDED."HorasAtrasoSnapshot";
                 """)
-                
                 session.execute(query, {
                     'cid': colab_id,
                     'per': str(periodo),
@@ -193,21 +183,18 @@ def fetch_validacoes_completo(conn, periodo):
     CORREÇÃO APLICADA: Normalização de colunas para UpperCase.
     """
     try:
-        # Query sem text() em volta para evitar problemas com alguns drivers, mas parametrizada
         q = 'SELECT "ColaboradorID", "Procedente", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot" FROM "ValidacaoPonto" WHERE "Periodo" = :per'
-        
         df = conn.query(q, params={'per': str(periodo)}, ttl=0)
         
         if not df.empty:
             # --- CORREÇÃO: Padroniza colunas para MAIÚSCULO ---
             df.columns = df.columns.str.upper()
             
-            # Garante que usamos a coluna certa, independente se veio 'colaboradorid' ou 'ColaboradorID'
+            # Garante que usamos a coluna certa
             if 'COLABORADORID' in df.columns:
                 df['COLABORADORID'] = df['COLABORADORID'].apply(clean_id)
                 
                 def format_snap(row):
-                    # Acessa colunas em Maiúsculo
                     f = int(row['QTDFALTASSNAPSHOT']) if pd.notnull(row['QTDFALTASSNAPSHOT']) else 0
                     h = float(row['HORASATRASOSNAPSHOT']) if pd.notnull(row['HORASATRASOSNAPSHOT']) else 0.0
                     if f == 0 and h == 0: return "-"
@@ -216,20 +203,16 @@ def fetch_validacoes_completo(conn, periodo):
 
                 df['SnapshotTexto'] = df.apply(format_snap, axis=1)
 
-                # Cria dicionários usando as colunas padronizadas
                 d_proc = dict(zip(df['COLABORADORID'], df['PROCEDENTE']))
                 
-                # UsuarioResponsavel pode vir nulo, trata com get
                 if 'USUARIORESPONSAVEL' in df.columns:
                     d_user = dict(zip(df['COLABORADORID'], df['USUARIORESPONSAVEL']))
                 else:
                     d_user = {}
 
                 d_snap = dict(zip(df['COLABORADORID'], df['SnapshotTexto']))
-                
                 return d_proc, d_user, d_snap
             else:
-                # Se mesmo com upper não achar, mostra erro
                 st.error(f"Colunas retornadas do BD: {list(df.columns)}. Esperado: COLABORADORID")
                 return {}, {}, {}
             
@@ -641,21 +624,22 @@ if st.session_state["busca_realizada"]:
         df_mestra['Total_Horas_Atraso'] = 0.0
         df_mestra['Datas'] = ""
 
-    # CÁLCULO DE CRITICIDADE (0 a 10)
-    # Regra: Se tem 1 falta, já é critico (Score 10). Atrasos somam pontos.
-    # Score = Min(10, (Faltas * 10) + (Horas / 8 * 5))
-    df_mestra['ScoreNum'] = (df_mestra['Qtd_Faltas'] * 10) + (df_mestra['Total_Horas_Atraso'] / 8.0 * 5)
-    df_mestra['ScoreNum'] = df_mestra['ScoreNum'].apply(lambda x: 10 if x > 10 else x)
+    # ==============================================================================
+    # CRITICIDADE: Pesos (Sem Teto)
+    # ==============================================================================
+    PESO_FALTA = 20.0
+    PESO_HORA_ATRASO = 1.0
+
+    df_mestra['ScoreNum'] = (df_mestra['Qtd_Faltas'] * PESO_FALTA) + (df_mestra['Total_Horas_Atraso'] * PESO_HORA_ATRASO)
     
     # Formatação Visual do Score
     def fmt_score(val):
         if val == 0: return "OK"
-        return f"{val:.1f}"
+        return f"{int(val)}"
     
     df_mestra['Criticidade Ponto'] = df_mestra['ScoreNum'].apply(fmt_score)
 
     # Colunas de Banco
-    # A MÁGICA ACONTECE AQUI: AGORA OS IDs SÃO STRINGS IGUAIS AO DICT
     df_mestra['Procedente'] = df_mestra['NRVINCULOM'].map(dict_validacoes).fillna(False)
     df_mestra['ValidadoPor'] = df_mestra['NRVINCULOM'].map(dict_usuarios).fillna("-")
     df_mestra['UltimaValidacao'] = df_mestra['NRVINCULOM'].map(dict_snapshots).fillna("-")
@@ -730,7 +714,7 @@ if st.session_state["busca_realizada"]:
         edited_df = st.data_editor(
             df_show[[
                 'Procedente', 
-                'Criticidade Ponto', # Nome alterado
+                'ScoreNum', # Coluna Numérica crua para a barra
                 'Qtd_Faltas', 
                 'Tempo_Atraso_Fmt', 
                 'Funcionario', 
@@ -738,14 +722,20 @@ if st.session_state["busca_realizada"]:
                 'ValidadoPor', 
                 'UltimaValidacao',
                 'Datas',
-                'Total_Horas_Atraso', # Hidden
-                'ScoreNum' # Hidden
+                'Total_Horas_Atraso' # Hidden
             ]],
             use_container_width=True,
             hide_index=True,
             column_config={
                 "Procedente": st.column_config.CheckboxColumn("Ok?", help="Marque para validar", default=False),
-                "Criticidade Ponto": st.column_config.TextColumn("Criticidade", help="10 = Crítico (Falta). OK = Sem problemas."),
+                # AQUI ESTÁ A MUDANÇA VISUAL (Barra de Progresso)
+                "ScoreNum": st.column_config.ProgressColumn(
+                    "Criticidade",
+                    help="Risco calculado (Falta = 20pts, Hora = 1pt)",
+                    format="%d",
+                    min_value=0,
+                    max_value=200, # Escala visual (quem passar de 200 enche a barra)
+                ),
                 "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
                 "Tempo_Atraso_Fmt": st.column_config.TextColumn("Atrasos"),
                 "Funcionario": st.column_config.TextColumn("Colaborador", width="medium"),
@@ -753,14 +743,12 @@ if st.session_state["busca_realizada"]:
                 "ValidadoPor": st.column_config.TextColumn("Validado Por", disabled=True),
                 "UltimaValidacao": st.column_config.TextColumn("Snapshot", disabled=True),
                 "Datas": st.column_config.TextColumn("Detalhe Datas", width="large"),
-                "Total_Horas_Atraso": None,
-                "ScoreNum": None
+                "Total_Horas_Atraso": None
             },
             key="editor_painel"
         )
         
         if st.form_submit_button("💾 Salvar Alterações"):
-            # OTIMIZAÇÃO: Salva apenas o que mudou
             dict_changes = st.session_state.get("editor_painel", {}).get("edited_rows", {})
             
             if not dict_changes:
@@ -774,7 +762,6 @@ if st.session_state["busca_realizada"]:
                 
                 save_validacao_batch_snapshot(conn, df_to_save, per_cache, usuario_atual)
                 
-                # Atualiza Cache Visual
                 new_proc = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
                 new_user = {k: usuario_atual for k, v in new_proc.items() if v}
                 
@@ -790,6 +777,5 @@ if st.session_state["busca_realizada"]:
                 st.session_state["dados_cache"]["snapshots"].update(new_snap)
                 st.rerun()
 
-    # DOWNLOAD
     csv = df_mestra.to_csv(index=False, sep=';', encoding='utf-8-sig')
     st.download_button("📥 Baixar Relatório Completo", csv, f"relatorio_diagnostico_{per_cache}.csv", "text/csv")
