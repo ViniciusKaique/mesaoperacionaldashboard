@@ -139,6 +139,7 @@ def clean_id(val):
     """
     try:
         if pd.isna(val): return "0"
+        # Converte para float primeiro (para pegar '123.0'), depois int, depois str
         return str(int(float(val)))
     except:
         return str(val).strip()
@@ -196,8 +197,8 @@ def fetch_validacoes_completo(conn, periodo):
         df = conn.query(query, params={'per': str(periodo)}, ttl=0)
         
         if not df.empty:
-            # AQUI ESTÁ O TRUQUE: Padroniza o ID que vem do banco para STRING
-            # para bater com o dataframe do Pandas
+            # AQUI ESTÁ O TRUQUE: Força converter o ID do banco para String Limpa
+            # Isso garante que bate com o ID do DataFrame principal
             df['ColaboradorID'] = df['ColaboradorID'].apply(clean_id)
             
             def format_snap(row):
@@ -209,7 +210,6 @@ def fetch_validacoes_completo(conn, periodo):
 
             df['SnapshotTexto'] = df.apply(format_snap, axis=1)
 
-            # Cria dicionários mapeados pela String do ID
             d_proc = dict(zip(df['ColaboradorID'], df['Procedente']))
             d_user = dict(zip(df['ColaboradorID'], df['UsuarioResponsavel']))
             d_snap = dict(zip(df['ColaboradorID'], df['SnapshotTexto']))
@@ -217,7 +217,7 @@ def fetch_validacoes_completo(conn, periodo):
             return d_proc, d_user, d_snap
             
     except Exception as e: 
-        print(f"Erro fetch: {e}")
+        print(f"Erro fetch DB: {e}")
         pass
     return {}, {}, {}
 
@@ -517,9 +517,9 @@ with st.sidebar:
 # --- EXECUÇÃO ---
 if st.session_state["busca_realizada"]:
     
-    # BUSCA SE CACHE VAZIO OU FALTANDO CHAVES
-    if not st.session_state["dados_cache"] or "snapshots" not in st.session_state["dados_cache"]:
-        with st.status("🔄 Calculando criticidade e baixando dados...", expanded=True) as status:
+    # SE FOR A PRIMEIRA VEZ, BUSCA TUDO
+    if not st.session_state["dados_cache"]:
+        with st.status("🔄 Buscando dados iniciais...", expanded=True) as status:
             df_func = fetch_ids_portal_gestor(data_ref, est_id)
             if df_func.empty:
                 status.update(label="❌ Sem funcionários.", state="error")
@@ -537,22 +537,28 @@ if st.session_state["busca_realizada"]:
                 
             df_oco = fetch_ocorrencias_hcm_turbo(token, lista_ids, per_id, mes_hcm)
             
-            # Busca Validações (Garante consistência de tipos)
-            conn = st.connection("postgres", type="sql")
-            d_proc, d_user, d_snap = fetch_validacoes_completo(conn, per_id)
-
             st.session_state["dados_cache"] = {
                 "funcionarios": df_func, 
                 "ocorrencias": df_oco, 
                 "periodo": per_id, 
                 "mapa_sup": mapa_supervisores,
                 "mapa_tel": mapa_telefones,
-                "validacoes": d_proc,
-                "usuarios_validacao": d_user,
-                "snapshots": d_snap
+                # Validacoes serão buscadas fora do cache "congelado" para atualização em tempo real
             }
             status.update(label="Pronto!", state="complete", expanded=False)
-            st.rerun()
+    
+    # ----------------------------------------------------------------------
+    # BUSCA DE VALIDAÇÕES DO BANCO (SEMPRE FRESCA)
+    # Isso garante que se você der F5, ele pega o estado atual do banco
+    # ----------------------------------------------------------------------
+    conn = st.connection("postgres", type="sql")
+    d_proc, d_user, d_snap = fetch_validacoes_completo(conn, st.session_state["dados_cache"]["periodo"])
+    
+    # Atualiza o cache local com as validações frescas
+    st.session_state["dados_cache"]["validacoes"] = d_proc
+    st.session_state["dados_cache"]["usuarios_validacao"] = d_user
+    st.session_state["dados_cache"]["snapshots"] = d_snap
+    # ----------------------------------------------------------------------
 
     # Recupera Cache
     df_func = st.session_state["dados_cache"]["funcionarios"].copy()
@@ -566,7 +572,7 @@ if st.session_state["busca_realizada"]:
     dict_snapshots = st.session_state["dados_cache"]["snapshots"]
 
     # --- APLICAÇÃO DOS MAPAS ---
-    # ESSENCIAL: Padronizar chave de ID para STRING LIMPA para garantir match
+    # ESSENCIAL: Padronizar chave de ID para STRING LIMPA para garantir match com o dicionário
     df_func['NRVINCULOM'] = df_func['NRVINCULOM'].apply(clean_id)
     
     df_func['Supervisor'] = df_func['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
@@ -625,12 +631,9 @@ if st.session_state["busca_realizada"]:
         df_mestra['Datas'] = ""
 
     # CÁLCULO DE CRITICIDADE (0 a 10)
-    # Regra: Se tem 1 falta, já é critico (Score 10). Atrasos somam pontos.
-    # Score = Min(10, (Faltas * 10) + (Horas / 8 * 5))
     df_mestra['ScoreNum'] = (df_mestra['Qtd_Faltas'] * 10) + (df_mestra['Total_Horas_Atraso'] / 8.0 * 5)
     df_mestra['ScoreNum'] = df_mestra['ScoreNum'].apply(lambda x: 10 if x > 10 else x)
     
-    # Formatação Visual do Score
     def fmt_score(val):
         if val == 0: return "OK"
         return f"{val:.1f}"
@@ -638,7 +641,7 @@ if st.session_state["busca_realizada"]:
     df_mestra['Criticidade Ponto'] = df_mestra['ScoreNum'].apply(fmt_score)
 
     # Colunas de Banco
-    # A MÁGICA ACONTECE AQUI: AGORA OS IDs SÃO STRINGS IGUAIS AO DICT
+    # AGORA O DICT_VALIDACOES E O DF_MESTRA USAM STRINGS LIMPAS PARA O MATCH
     df_mestra['Procedente'] = df_mestra['NRVINCULOM'].map(dict_validacoes).fillna(False)
     df_mestra['ValidadoPor'] = df_mestra['NRVINCULOM'].map(dict_usuarios).fillna("-")
     df_mestra['UltimaValidacao'] = df_mestra['NRVINCULOM'].map(dict_snapshots).fillna("-")
@@ -649,9 +652,7 @@ if st.session_state["busca_realizada"]:
     c1, c2, c3, c4 = st.columns(4)
     total_colab = len(df_mestra)
     
-    # Validados ou Sem Ocorrências
     df_ok = df_mestra[(df_mestra['ScoreNum'] == 0) | (df_mestra['Procedente'] == True)]
-    # Críticos Pendentes
     df_critico = df_mestra[(df_mestra['ScoreNum'] > 0) & (df_mestra['Procedente'] == False)]
     
     c1.metric("Total Colaboradores", total_colab)
@@ -663,25 +664,19 @@ if st.session_state["busca_realizada"]:
     st.divider()
     c_alert, _ = st.columns([1, 4])
     with c_alert:
-        # Botão normal (cor do tema)
         if st.button("📢 Central de Alertas", use_container_width=True):
             dialog_alertas_ponto(df_mestra, mapa_tel, per_cache)
 
     # GRÁFICO EMPILHADO (AZUL E VERMELHO)
     st.subheader("📊 Status da Equipe por Supervisor")
     
-    # Agrupa dados para o gráfico
-    # Simplificação: Ou está Resolvido/OK (Azul) ou está Pendente (Vermelho)
     def categorizar_simples(row):
-        # Se não tem score (0) OU já foi validado -> Azul
         if row['ScoreNum'] == 0 or row['Procedente']: 
             return "Resolvido/Ok"
-        # Se tem score e não validou -> Vermelho
         return "Pendência"
     
     df_mestra['StatusGrafico'] = df_mestra.apply(categorizar_simples, axis=1)
     
-    # Agrupamento final
     df_chart = df_mestra.groupby(['Supervisor', 'StatusGrafico']).size().reset_index(name='Qtd')
     
     color_map = {
@@ -706,18 +701,17 @@ if st.session_state["busca_realizada"]:
     st.subheader("📋 Painel de Controle Unificado")
     st.caption("Ordenado por criticidade. Use a caixa 'Ok?' para validar as pendências.")
 
-    # Ordenação: Score Descendente, mas "OK" (0) fica pro final
     df_show = df_mestra.sort_values(by=['ScoreNum'], ascending=False).copy()
     
     with st.form("form_painel"):
         edited_df = st.data_editor(
             df_show[[
                 'Procedente', 
-                'Criticidade Ponto', # Nome alterado
+                'Criticidade Ponto', 
                 'Qtd_Faltas', 
                 'Tempo_Atraso_Fmt', 
                 'Funcionario', 
-                'NRVINCULOM', # ID visivel
+                'NRVINCULOM', 
                 'ValidadoPor', 
                 'UltimaValidacao',
                 'Datas',
@@ -743,7 +737,6 @@ if st.session_state["busca_realizada"]:
         )
         
         if st.form_submit_button("💾 Salvar Alterações"):
-            # OTIMIZAÇÃO: Salva apenas o que mudou
             dict_changes = st.session_state.get("editor_painel", {}).get("edited_rows", {})
             
             if not dict_changes:
@@ -757,20 +750,7 @@ if st.session_state["busca_realizada"]:
                 
                 save_validacao_batch_snapshot(conn, df_to_save, per_cache, usuario_atual)
                 
-                # Atualiza Cache Visual
-                new_proc = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
-                new_user = {k: usuario_atual for k, v in new_proc.items() if v}
-                
-                def fmt(row):
-                    f = int(row['Qtd_Faltas'])
-                    h = float(row['Total_Horas_Atraso'])
-                    return f"{f} Faltas | {decimal_para_hora(h)}h"
-                
-                new_snap = {row['NRVINCULOM']: fmt(row) for _, row in edited_df.iterrows() if row['Procedente']}
-                
-                st.session_state["dados_cache"]["validacoes"].update(new_proc)
-                st.session_state["dados_cache"]["usuarios_validacao"].update(new_user)
-                st.session_state["dados_cache"]["snapshots"].update(new_snap)
+                # A atualização do cache é feita no rerun, pois fetch_validacoes_completo está fora do cache congelado
                 st.rerun()
 
     # DOWNLOAD
