@@ -132,8 +132,13 @@ def obter_sessao_hcm():
 # 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT
 # ==============================================================================
 def clean_id(val):
-    """Padroniza ID para string numérica sem .0"""
+    """
+    Padroniza ID para string numérica pura.
+    Remove .0, espaços e converte float/int para str.
+    Essencial para o match do banco funcionar.
+    """
     try:
+        if pd.isna(val): return "0"
         return str(int(float(val)))
     except:
         return str(val).strip()
@@ -150,7 +155,7 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
         with conn.session as session:
             for index, row in df_changes.iterrows():
                 try:
-                    # Garante que salva como BIGINT no banco
+                    # O ID no banco é BigInt, garantimos conversão correta
                     colab_id = int(float(row['NRVINCULOM']))
                 except: continue
 
@@ -191,7 +196,8 @@ def fetch_validacoes_completo(conn, periodo):
         df = conn.query(query, params={'per': str(periodo)}, ttl=0)
         
         if not df.empty:
-            # Padroniza ID para bater com o dataframe principal
+            # AQUI ESTÁ O TRUQUE: Padroniza o ID que vem do banco para STRING
+            # para bater com o dataframe do Pandas
             df['ColaboradorID'] = df['ColaboradorID'].apply(clean_id)
             
             def format_snap(row):
@@ -203,6 +209,7 @@ def fetch_validacoes_completo(conn, periodo):
 
             df['SnapshotTexto'] = df.apply(format_snap, axis=1)
 
+            # Cria dicionários mapeados pela String do ID
             d_proc = dict(zip(df['ColaboradorID'], df['Procedente']))
             d_user = dict(zip(df['ColaboradorID'], df['UsuarioResponsavel']))
             d_snap = dict(zip(df['ColaboradorID'], df['SnapshotTexto']))
@@ -210,6 +217,7 @@ def fetch_validacoes_completo(conn, periodo):
             return d_proc, d_user, d_snap
             
     except Exception as e: 
+        print(f"Erro fetch: {e}")
         pass
     return {}, {}, {}
 
@@ -558,7 +566,9 @@ if st.session_state["busca_realizada"]:
     dict_snapshots = st.session_state["dados_cache"]["snapshots"]
 
     # --- APLICAÇÃO DOS MAPAS ---
+    # ESSENCIAL: Padronizar chave de ID para STRING LIMPA para garantir match
     df_func['NRVINCULOM'] = df_func['NRVINCULOM'].apply(clean_id)
+    
     df_func['Supervisor'] = df_func['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
     mapa_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
     
@@ -625,9 +635,10 @@ if st.session_state["busca_realizada"]:
         if val == 0: return "OK"
         return f"{val:.1f}"
     
-    df_mestra['ScoreVisual'] = df_mestra['ScoreNum'].apply(fmt_score)
+    df_mestra['Criticidade Ponto'] = df_mestra['ScoreNum'].apply(fmt_score)
 
     # Colunas de Banco
+    # A MÁGICA ACONTECE AQUI: AGORA OS IDs SÃO STRINGS IGUAIS AO DICT
     df_mestra['Procedente'] = df_mestra['NRVINCULOM'].map(dict_validacoes).fillna(False)
     df_mestra['ValidadoPor'] = df_mestra['NRVINCULOM'].map(dict_usuarios).fillna("-")
     df_mestra['UltimaValidacao'] = df_mestra['NRVINCULOM'].map(dict_snapshots).fillna("-")
@@ -656,27 +667,26 @@ if st.session_state["busca_realizada"]:
         if st.button("📢 Central de Alertas", use_container_width=True):
             dialog_alertas_ponto(df_mestra, mapa_tel, per_cache)
 
-    # GRÁFICO EMPILHADO
+    # GRÁFICO EMPILHADO (AZUL E VERMELHO)
     st.subheader("📊 Status da Equipe por Supervisor")
     
     # Agrupa dados para o gráfico
-    grp = df_mestra.groupby(['Supervisor', 'Procedente', 'ScoreNum']).size().reset_index(name='Qtd')
+    # Simplificação: Ou está Resolvido/OK (Azul) ou está Pendente (Vermelho)
+    def categorizar_simples(row):
+        # Se não tem score (0) OU já foi validado -> Azul
+        if row['ScoreNum'] == 0 or row['Procedente']: 
+            return "Resolvido/Ok"
+        # Se tem score e não validou -> Vermelho
+        return "Pendência"
     
-    # Cria categorias para o gráfico
-    def categorizar(row):
-        if row['ScoreNum'] == 0: return "Excelente/Sem Problemas"
-        if row['Procedente']: return "Validado/Resolvido"
-        return "Crítico Pendente"
-    
-    df_mestra['StatusGrafico'] = df_mestra.apply(categorizar, axis=1)
+    df_mestra['StatusGrafico'] = df_mestra.apply(categorizar_simples, axis=1)
     
     # Agrupamento final
     df_chart = df_mestra.groupby(['Supervisor', 'StatusGrafico']).size().reset_index(name='Qtd')
     
     color_map = {
-        "Excelente/Sem Problemas": "#28a745", # Verde
-        "Validado/Resolvido": "#1E90FF",      # Azul
-        "Crítico Pendente": "#dc3545"         # Vermelho
+        "Resolvido/Ok": "#007bff", # Azul
+        "Pendência": "#dc3545"     # Vermelho
     }
     
     fig = px.bar(
@@ -685,7 +695,7 @@ if st.session_state["busca_realizada"]:
         y='Qtd', 
         color='StatusGrafico',
         color_discrete_map=color_map,
-        title="Pontos Validados/OK vs Pontos Pendentes",
+        title="Pendências vs Resolvidos",
         text_auto=True
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -703,7 +713,7 @@ if st.session_state["busca_realizada"]:
         edited_df = st.data_editor(
             df_show[[
                 'Procedente', 
-                'ScoreVisual',
+                'Criticidade Ponto', # Nome alterado
                 'Qtd_Faltas', 
                 'Tempo_Atraso_Fmt', 
                 'Funcionario', 
@@ -718,7 +728,7 @@ if st.session_state["busca_realizada"]:
             hide_index=True,
             column_config={
                 "Procedente": st.column_config.CheckboxColumn("Ok?", help="Marque para validar", default=False),
-                "ScoreVisual": st.column_config.TextColumn("Score (0-10)", help="10 = Crítico (Falta). OK = Sem problemas."),
+                "Criticidade Ponto": st.column_config.TextColumn("Criticidade", help="10 = Crítico (Falta). OK = Sem problemas."),
                 "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
                 "Tempo_Atraso_Fmt": st.column_config.TextColumn("Atrasos"),
                 "Funcionario": st.column_config.TextColumn("Colaborador", width="medium"),
