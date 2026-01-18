@@ -627,8 +627,8 @@ if st.session_state["busca_realizada"]:
     # ==============================================================================
     # CRITICIDADE: Pesos (Sem Teto)
     # ==============================================================================
-    PESO_FALTA = 0.5
-    PESO_HORA_ATRASO = 0.0625
+    PESO_FALTA = 1
+    PESO_HORA_ATRASO = 0.125
 
     df_mestra['ScoreNum'] = (df_mestra['Qtd_Faltas'] * PESO_FALTA) + (df_mestra['Total_Horas_Atraso'] * PESO_HORA_ATRASO)
     
