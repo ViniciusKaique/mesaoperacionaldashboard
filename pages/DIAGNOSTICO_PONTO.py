@@ -129,34 +129,29 @@ def obter_sessao_hcm():
     return None
 
 # ==============================================================================
-# 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT (LÓGICA BLINDADA)
+# 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT (ABORDAGEM INT SIMPLIFICADA)
 # ==============================================================================
 
-def clean_str_num(val):
-    """
-    Padroniza QUALQUER formato numérico (ID ou Periodo) para String Limpa.
-    Ex: 1904 -> "1904" | "1904.0" -> "1904" | " 1904 " -> "1904"
-    """
+def to_int_safe(val):
+    """Converte qualquer coisa para Inteiro Python puro. Retorna 0 se falhar."""
     try:
-        if pd.isna(val) or str(val).strip() == "": return ""
-        return str(int(float(val)))
+        if pd.isna(val): return 0
+        return int(float(val)) # float primeiro lida com "123.0"
     except:
-        return str(val).strip()
+        return 0
 
 def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel):
-    """Salva validação + Quem validou + Snapshot"""
     if df_changes.empty: return
     
     user_safe = usuario_responsavel if usuario_responsavel else "Sistema"
-    per_clean = clean_str_num(periodo) # Garante periodo limpo no insert
+    periodo_str = str(periodo).strip() # Garante string
     
     try:
         with conn.session as session:
             for index, row in df_changes.iterrows():
-                try:
-                    # Garante que salva como BIGINT no banco
-                    colab_id = int(float(row['NRVINCULOM']))
-                except: continue
+                # Converte ID para Inteiro Puro
+                colab_id = to_int_safe(row['NRVINCULOM'])
+                if colab_id == 0: continue
 
                 proc_bool = bool(row['Procedente'])
                 snap_faltas = int(row.get('Qtd_Faltas', 0))
@@ -177,7 +172,7 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
                 
                 session.execute(query, {
                     'cid': colab_id,
-                    'per': per_clean,
+                    'per': periodo_str,
                     'proc': proc_bool,
                     'user': user_safe,
                     'sf': snap_faltas,
@@ -190,17 +185,18 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
 
 def fetch_validacoes_completo(conn, periodo):
     """
-    Busca as validações do banco e aplica a limpeza de ID rigorosa.
+    Busca do banco e retorna Dicionários com chaves INTEIRAS.
     """
-    per_clean = clean_str_num(periodo) # Garante busca limpa
+    periodo_str = str(periodo).strip()
+    
     try:
-        # Busca no banco
+        # Busca simples
         query = text('SELECT "ColaboradorID", "Procedente", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot" FROM "ValidacaoPonto" WHERE "Periodo" = :per')
-        df = conn.query(query, params={'per': per_clean}, ttl=0)
+        df = conn.query(query, params={'per': periodo_str}, ttl=0)
         
         if not df.empty:
-            # AQUI ESTÁ O SEGREDO: Aplica clean_str_num no ID que veio do BANCO
-            df['ColaboradorID'] = df['ColaboradorID'].apply(clean_str_num)
+            # Converte ID do banco para Inteiro Python
+            df['ColaboradorID'] = df['ColaboradorID'].apply(to_int_safe)
             
             def format_snap(row):
                 f = int(row['QtdFaltasSnapshot']) if pd.notnull(row['QtdFaltasSnapshot']) else 0
@@ -211,6 +207,7 @@ def fetch_validacoes_completo(conn, periodo):
 
             df['SnapshotTexto'] = df.apply(format_snap, axis=1)
 
+            # Dicionários usando CHAVE INT
             d_proc = dict(zip(df['ColaboradorID'], df['Procedente']))
             d_user = dict(zip(df['ColaboradorID'], df['UsuarioResponsavel']))
             d_snap = dict(zip(df['ColaboradorID'], df['SnapshotTexto']))
@@ -236,8 +233,8 @@ def fetch_dados_supervisores_completo():
         df_map = conn.query(q1)
         mapa_sup = {}
         if not df_map.empty:
-            # Aplica clean_str_num também aqui
-            df_map['Matricula'] = df_map['Matricula'].apply(clean_str_num)
+            # Chave Int
+            df_map['Matricula'] = df_map['Matricula'].apply(to_int_safe)
             df_map['Supervisor'] = df_map['Supervisor'].str.strip().str.upper()
             mapa_sup = dict(zip(df_map['Matricula'], df_map['Supervisor']))
 
@@ -461,7 +458,7 @@ def dialog_alertas_ponto(df_resumo, mapa_tel, periodo):
             with c2:
                 if tel:
                     link = gerar_link_whatsapp(tel, msg_final)
-                    st.link_button("📲 Enviar", link, use_container_width=True) # Botão padrão (secondary)
+                    st.link_button("📲 Enviar", link, use_container_width=True)
                 else:
                     st.warning("Sem Celular")
 
@@ -500,9 +497,9 @@ with st.sidebar:
     else:
         per_id = st.text_input("Cód. Período", value="1904")
 
-    # --- FORÇA LIMPEZA DO PERIODO AQUI ---
-    per_id = clean_str_num(per_id)
-    # -------------------------------------
+    # --- FORÇA PERIODO COMO STRING ---
+    per_id = str(per_id).strip()
+    # ---------------------------------
 
     mes_hcm = st.text_input("Mês Comp. (HCM)", value=comp_sug)
     data_ref = st.date_input("Data Ref. Ativos", datetime.now())
@@ -523,7 +520,7 @@ with st.sidebar:
 # --- EXECUÇÃO ---
 if st.session_state["busca_realizada"]:
     
-    # SE FOR A PRIMEIRA VEZ, BUSCA TUDO
+    # 1. BUSCA PESADA (API + DADOS GERAIS) - SÓ RODA SE NÃO TIVER CACHE
     if not st.session_state["dados_cache"]:
         with st.status("🔄 Buscando dados iniciais...", expanded=True) as status:
             df_func = fetch_ids_portal_gestor(data_ref, est_id)
@@ -546,15 +543,14 @@ if st.session_state["busca_realizada"]:
             st.session_state["dados_cache"] = {
                 "funcionarios": df_func, 
                 "ocorrencias": df_oco, 
-                "periodo": per_id, # Já está limpo aqui
+                "periodo": per_id, 
                 "mapa_sup": mapa_supervisores,
                 "mapa_tel": mapa_telefones,
             }
             status.update(label="Pronto!", state="complete", expanded=False)
-    
-    # 2. BUSCA DE VALIDAÇÕES (SEMPRE ATUALIZADA)
+            
+    # 2. BUSCA DE VALIDAÇÕES (SEMPRE ATUALIZADA DO BANCO)
     conn = st.connection("postgres", type="sql")
-    # Usa o periodo limpo salvo no cache
     d_proc, d_user, d_snap = fetch_validacoes_completo(conn, st.session_state["dados_cache"]["periodo"])
     
     st.session_state["dados_cache"]["validacoes"] = d_proc
@@ -573,8 +569,8 @@ if st.session_state["busca_realizada"]:
     dict_snapshots = st.session_state["dados_cache"]["snapshots"]
 
     # --- APLICAÇÃO DOS MAPAS ---
-    # Limpa IDs para garantir match
-    df_func['NRVINCULOM'] = df_func['NRVINCULOM'].apply(clean_str_num)
+    # NORMALIZAÇÃO: ID PARA INT PURO
+    df_func['NRVINCULOM'] = df_func['NRVINCULOM'].apply(to_int_safe)
     
     df_func['Supervisor'] = df_func['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
     mapa_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
@@ -584,7 +580,7 @@ if st.session_state["busca_realizada"]:
         df_func = df_func[df_func['Supervisor'].isin(filtro_sup_sidebar)]
         valid_ids = df_func['NRVINCULOM'].unique()
         if not df_oco.empty:
-            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(clean_str_num)
+            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(to_int_safe)
             df_oco = df_oco[df_oco['NRVINCULOM'].isin(valid_ids)]
 
     # 4. CRIAÇÃO DA TABELA MESTRA
@@ -593,7 +589,7 @@ if st.session_state["busca_realizada"]:
     
     if not df_oco.empty:
         df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
-        df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(clean_str_num)
+        df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(to_int_safe) # ID como Int
         df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
         df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
 
@@ -636,6 +632,7 @@ if st.session_state["busca_realizada"]:
     df_mestra['Criticidade Ponto'] = df_mestra['ScoreNum'].apply(fmt_score)
 
     # 5. MAPEAMENTO DO BANCO DE DADOS
+    # NRVINCULOM é Int. dict_validacoes chaves são Int. Match perfeito.
     df_mestra['Procedente'] = df_mestra['NRVINCULOM'].map(dict_validacoes).fillna(False)
     df_mestra['ValidadoPor'] = df_mestra['NRVINCULOM'].map(dict_usuarios).fillna("-")
     df_mestra['UltimaValidacao'] = df_mestra['NRVINCULOM'].map(dict_snapshots).fillna("-")
@@ -661,7 +658,7 @@ if st.session_state["busca_realizada"]:
         if st.button("📢 Central de Alertas", use_container_width=True):
             dialog_alertas_ponto(df_mestra, mapa_tel, per_cache)
 
-    # GRÁFICO EMPILHADO (AZUL E VERMELHO)
+    # GRÁFICO EMPILHADO
     st.subheader("📊 Status da Equipe por Supervisor")
     
     def categorizar_simples(row):
@@ -743,8 +740,6 @@ if st.session_state["busca_realizada"]:
                 usuario_atual = st.session_state.get("name", "Usuario Desconhecido")
                 
                 save_validacao_batch_snapshot(conn, df_to_save, per_cache, usuario_atual)
-                
-                # A atualização do cache é feita no rerun
                 st.rerun()
 
     # DOWNLOAD
