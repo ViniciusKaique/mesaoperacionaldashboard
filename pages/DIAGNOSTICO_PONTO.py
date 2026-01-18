@@ -131,10 +131,16 @@ def obter_sessao_hcm():
 # ==============================================================================
 # 4. BANCO DE DADOS - VALIDAÇÃO & SNAPSHOT
 # ==============================================================================
+def clean_id(val):
+    """Padroniza ID para string numérica sem .0"""
+    try:
+        return str(int(float(val)))
+    except:
+        return str(val).strip()
 
 def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel):
     """
-    Salva validação + Quem validou + Snapshot (Qtd Faltas e Horas no momento da validação)
+    Salva validação + Quem validou + Snapshot
     """
     if df_changes.empty: return
     
@@ -144,16 +150,14 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
         with conn.session as session:
             for index, row in df_changes.iterrows():
                 try:
+                    # Garante que salva como BIGINT no banco
                     colab_id = int(float(row['NRVINCULOM']))
                 except: continue
 
                 proc_bool = bool(row['Procedente'])
-                
-                # Dados do Snapshot (O que existia quando validou)
                 snap_faltas = int(row.get('Qtd_Faltas', 0))
                 snap_horas = float(row.get('Total_Horas_Atraso', 0.0))
 
-                # Query com UPSERT para todas as colunas
                 query = text("""
                     INSERT INTO "ValidacaoPonto" 
                     ("ColaboradorID", "Periodo", "Procedente", "DataVerificacao", "UsuarioResponsavel", "QtdFaltasSnapshot", "HorasAtrasoSnapshot")
@@ -176,7 +180,7 @@ def save_validacao_batch_snapshot(conn, df_changes, periodo, usuario_responsavel
                     'sh': snap_horas
                 })
             session.commit()
-        st.toast(f"{len(df_changes)} Validações salvas com sucesso!", icon="🚀")
+        st.toast(f"{len(df_changes)} Validações salvas!", icon="✅")
     except Exception as e:
         st.error(f"Erro ao salvar: {e}")
 
@@ -187,9 +191,9 @@ def fetch_validacoes_completo(conn, periodo):
         df = conn.query(query, params={'per': str(periodo)}, ttl=0)
         
         if not df.empty:
-            df['ColaboradorID'] = df['ColaboradorID'].astype(str).str.split('.').str[0]
+            # Padroniza ID para bater com o dataframe principal
+            df['ColaboradorID'] = df['ColaboradorID'].apply(clean_id)
             
-            # Formata texto do snapshot para exibição
             def format_snap(row):
                 f = int(row['QtdFaltasSnapshot']) if pd.notnull(row['QtdFaltasSnapshot']) else 0
                 h = float(row['HorasAtrasoSnapshot']) if pd.notnull(row['HorasAtrasoSnapshot']) else 0.0
@@ -199,7 +203,6 @@ def fetch_validacoes_completo(conn, periodo):
 
             df['SnapshotTexto'] = df.apply(format_snap, axis=1)
 
-            # Retorna dicionários auxiliares
             d_proc = dict(zip(df['ColaboradorID'], df['Procedente']))
             d_user = dict(zip(df['ColaboradorID'], df['UsuarioResponsavel']))
             d_snap = dict(zip(df['ColaboradorID'], df['SnapshotTexto']))
@@ -212,7 +215,6 @@ def fetch_validacoes_completo(conn, periodo):
 
 @st.cache_data(ttl=600)
 def fetch_dados_supervisores_completo():
-    """Busca mapa de supervisores e seus telefones"""
     try:
         conn = st.connection("postgres", type="sql")
         q1 = """
@@ -225,7 +227,7 @@ def fetch_dados_supervisores_completo():
         df_map = conn.query(q1)
         mapa_sup = {}
         if not df_map.empty:
-            df_map['Matricula'] = pd.to_numeric(df_map['Matricula'], errors='coerce').fillna(0).astype(int).astype(str)
+            df_map['Matricula'] = df_map['Matricula'].apply(clean_id)
             df_map['Supervisor'] = df_map['Supervisor'].str.strip().str.upper()
             mapa_sup = dict(zip(df_map['Matricula'], df_map['Supervisor']))
 
@@ -403,11 +405,11 @@ def mostrar_espelho_modal(nome, vinculo, periodo):
 def dialog_alertas_ponto(df_resumo, mapa_tel, periodo):
     st.caption(f"Envio de cobrança sobre Faltas e Atrasos (Período: {periodo})")
     
-    # Filtra por Score > 0 (Faltas ou Atrasos)
-    df_probs = df_resumo[df_resumo['Score'] > 0].copy()
+    # Filtra: Só exibe quem tem Score > 0 e NÃO foi validado
+    df_probs = df_resumo[(df_resumo['ScoreNum'] > 0) & (df_resumo['Procedente'] == False)].copy()
 
     if df_probs.empty:
-        st.success("Tudo limpo! Nenhuma ocorrência para cobrar.")
+        st.success("Tudo validado ou sem ocorrências! Nenhuma cobrança pendente.")
         return
 
     supervisores = sorted(df_probs['Supervisor'].unique())
@@ -438,19 +440,18 @@ def dialog_alertas_ponto(df_resumo, mapa_tel, periodo):
             msg_lines.append("Por favor, verificar se procede.")
             msg_final = "\n".join(msg_lines)
 
-            # Pega Telefone
             tel = mapa_tel.get(sup)
 
             with c1:
                 st.markdown(f"**👤 {sup}**")
-                st.caption(f"Faltas: {total_f} | Atrasos: {decimal_para_hora(total_h)}")
-                with st.expander("Ver texto"):
+                st.caption(f"Pendências: {len(df_sup)} colaboradores")
+                with st.expander("Ver mensagem"):
                     st.text(msg_final)
             
             with c2:
                 if tel:
                     link = gerar_link_whatsapp(tel, msg_final)
-                    st.link_button("📲 Enviar", link, use_container_width=True)
+                    st.link_button("📲 Enviar", link, use_container_width=True) # Botão padrão (secondary)
                 else:
                     st.warning("Sem Celular")
 
@@ -458,8 +459,8 @@ def dialog_alertas_ponto(df_resumo, mapa_tel, periodo):
 # 8. LÓGICA PRINCIPAL (UI)
 # ==============================================================================
 
-st.title("⚡ Criticidade de Ponto (Faltas + Atrasos)")
-st.markdown("**Regra de Ouro:** Criticidade = Faltas + (Horas de Atraso / 8).")
+st.title("⚡ Diagnóstico de Ponto (Criticidade)")
+st.caption("Visão unificada de Faltas, Atrasos e Validações.")
 
 if "busca_realizada" not in st.session_state: st.session_state["busca_realizada"] = False
 if "dados_cache" not in st.session_state: st.session_state["dados_cache"] = {}
@@ -508,8 +509,8 @@ with st.sidebar:
 # --- EXECUÇÃO ---
 if st.session_state["busca_realizada"]:
     
-    # 1. BUSCA (CACHE) - SE NÃO TIVER OU SE FALTAR DADOS NOVOS
-    if not st.session_state["dados_cache"] or "usuarios_validacao" not in st.session_state["dados_cache"]:
+    # BUSCA SE CACHE VAZIO OU FALTANDO CHAVES
+    if not st.session_state["dados_cache"] or "snapshots" not in st.session_state["dados_cache"]:
         with st.status("🔄 Calculando criticidade e baixando dados...", expanded=True) as status:
             df_func = fetch_ids_portal_gestor(data_ref, est_id)
             if df_func.empty:
@@ -528,7 +529,7 @@ if st.session_state["busca_realizada"]:
                 
             df_oco = fetch_ocorrencias_hcm_turbo(token, lista_ids, per_id, mes_hcm)
             
-            # Busca Dados Completos de Validação (Proc, User, Snapshot)
+            # Busca Validações (Garante consistência de tipos)
             conn = st.connection("postgres", type="sql")
             d_proc, d_user, d_snap = fetch_validacoes_completo(conn, per_id)
 
@@ -557,196 +558,211 @@ if st.session_state["busca_realizada"]:
     dict_snapshots = st.session_state["dados_cache"]["snapshots"]
 
     # --- APLICAÇÃO DOS MAPAS ---
-    df_func['NRVINCULOM'] = df_func['NRVINCULOM'].astype(str)
+    df_func['NRVINCULOM'] = df_func['NRVINCULOM'].apply(clean_id)
     df_func['Supervisor'] = df_func['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
     mapa_nome = dict(zip(df_func['NRVINCULOM'], df_func['NMVINCULOM']))
     
     # --- FILTRO DE SUPERVISOR ---
     if filtro_sup_sidebar:
         df_func = df_func[df_func['Supervisor'].isin(filtro_sup_sidebar)]
-        ids_validos = df_func['NRVINCULOM'].astype(str).tolist()
+        # Se filtrou supervisor, reduz a lista de IDs válidos
+        valid_ids = df_func['NRVINCULOM'].unique()
         if not df_oco.empty:
-            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
-            df_oco = df_oco[df_oco['NRVINCULOM'].isin(ids_validos)]
+            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(clean_id)
+            df_oco = df_oco[df_oco['NRVINCULOM'].isin(valid_ids)]
 
     # 3. PROCESSAMENTO
     hoje = datetime.now().strftime('%Y-%m-%d')
     
-    if df_oco.empty and df_func.empty:
-        st.warning("Nenhum dado para os filtros selecionados.")
+    # Cria Base Mestra com Todos os Funcionários do Filtro
+    df_mestra = df_func[['NRVINCULOM', 'NMVINCULOM', 'Supervisor']].rename(columns={'NMVINCULOM':'Funcionario'}).copy()
+    
+    if not df_oco.empty:
+        df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
+        df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].apply(clean_id)
+        df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
+        df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
+
+        # Filtros de Data
+        df_oco = df_oco[df_oco['DATA_INICIO_FILTER'] != hoje].copy()
+        df_oco['DT_OBJ'] = pd.to_datetime(df_oco['DATA_INICIO_FILTER'], errors='coerce')
+        
+        anos = df_oco['DT_OBJ'].dt.year.unique().tolist()
+        feriados = get_feriados_set(anos)
+        
+        df_oco['DIA_SEMANA'] = df_oco['DT_OBJ'].dt.dayofweek 
+        df_oco['IS_FERIADO'] = df_oco['DATA_INICIO_FILTER'].map(lambda x: x in feriados)
+        
+        # Ocorrências Válidas
+        df_faltas = df_oco[
+            (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
+            (df_oco['DIA_SEMANA'] < 5) & (df_oco['IS_FERIADO'] == False)
+        ].copy()
+        
+        df_atrasos = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
+
+        # Agregações
+        s_faltas = df_faltas.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
+        s_atrasos = df_atrasos.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
+        s_datas = df_oco.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
+
+        # Join na Mestra
+        df_mestra = df_mestra.set_index('NRVINCULOM')
+        df_mestra = df_mestra.join(s_faltas).join(s_atrasos).join(s_datas).fillna(0).reset_index()
     else:
-        if not df_oco.empty:
-            df_oco['DIFF_HOURS'] = pd.to_numeric(df_oco['DIFF_HOURS'], errors='coerce').fillna(0)
-            df_oco['NRVINCULOM'] = df_oco['NRVINCULOM'].astype(str)
-            df_oco['DATA_INICIO_FILTER'] = df_oco['DATA_INICIO_FILTER'].astype(str)
-            df_oco['TIPO_OCORRENCIA'] = df_oco['TIPO_OCORRENCIA'].str.strip().str.upper()
-            
-            df_oco['Funcionario'] = df_oco['NRVINCULOM'].map(mapa_nome).fillna(df_oco['NMVINCULOM'])
-            df_oco['Supervisor'] = df_oco['NRVINCULOM'].map(mapa_sup).fillna("NÃO IDENTIFICADO")
+        df_mestra['Qtd_Faltas'] = 0
+        df_mestra['Total_Horas_Atraso'] = 0.0
+        df_mestra['Datas'] = ""
 
-            # FILTROS DE DATA
-            df_oco = df_oco[df_oco['DATA_INICIO_FILTER'] != hoje].copy()
-            df_oco['DT_OBJ'] = pd.to_datetime(df_oco['DATA_INICIO_FILTER'], errors='coerce')
-            
-            anos_ocorrencias = df_oco['DT_OBJ'].dt.year.unique().tolist()
-            feriados_dict = get_feriados_set(anos_ocorrencias)
-            
-            df_oco['DIA_SEMANA'] = df_oco['DT_OBJ'].dt.dayofweek 
-            df_oco['IS_FERIADO'] = df_oco['DATA_INICIO_FILTER'].map(lambda x: x in feriados_dict)
-            df_oco['NOME_FERIADO'] = df_oco['DATA_INICIO_FILTER'].map(feriados_dict).fillna("")
-            
-            # SEPARAÇÃO
-            df_faltas_uteis = df_oco[
-                (df_oco['TIPO_OCORRENCIA'] == 'FALTA') & 
-                (df_oco['DIA_SEMANA'] < 5) & (df_oco['IS_FERIADO'] == False)
-            ].copy()
-            
-            df_atrasos_all = df_oco[df_oco['TIPO_OCORRENCIA'] == 'ATRASO'].copy()
+    # CÁLCULO DE CRITICIDADE (0 a 10)
+    # Regra: Se tem 1 falta, já é critico (Score 10). Atrasos somam pontos.
+    # Score = Min(10, (Faltas * 10) + (Horas / 8 * 5))
+    df_mestra['ScoreNum'] = (df_mestra['Qtd_Faltas'] * 10) + (df_mestra['Total_Horas_Atraso'] / 8.0 * 5)
+    df_mestra['ScoreNum'] = df_mestra['ScoreNum'].apply(lambda x: 10 if x > 10 else x)
+    
+    # Formatação Visual do Score
+    def fmt_score(val):
+        if val == 0: return "OK"
+        return f"{val:.1f}"
+    
+    df_mestra['ScoreVisual'] = df_mestra['ScoreNum'].apply(fmt_score)
 
-            # AGREGAÇÕES
-            s_faltas = df_faltas_uteis.drop_duplicates(subset=['NRVINCULOM', 'DATA_INICIO']).groupby('NRVINCULOM').size().rename('Qtd_Faltas')
-            s_atrasos = df_atrasos_all.groupby('NRVINCULOM')['DIFF_HOURS'].sum().rename('Total_Horas_Atraso')
-            s_datas = df_oco.groupby('NRVINCULOM')['DATA_INICIO'].unique().apply(lambda x: ", ".join(sorted(x))).rename('Datas')
+    # Colunas de Banco
+    df_mestra['Procedente'] = df_mestra['NRVINCULOM'].map(dict_validacoes).fillna(False)
+    df_mestra['ValidadoPor'] = df_mestra['NRVINCULOM'].map(dict_usuarios).fillna("-")
+    df_mestra['UltimaValidacao'] = df_mestra['NRVINCULOM'].map(dict_snapshots).fillna("-")
+    
+    df_mestra['Tempo_Atraso_Fmt'] = df_mestra['Total_Horas_Atraso'].apply(decimal_para_hora)
 
-            # JOIN FINAL
-            df_base = df_oco[['NRVINCULOM', 'Funcionario', 'Supervisor']].drop_duplicates('NRVINCULOM').set_index('NRVINCULOM')
-            resumo = df_base.join(s_faltas, how='left').join(s_atrasos, how='left').join(s_datas, how='left').fillna(0).reset_index()
-            
-            # TIPAGEM
-            resumo['Qtd_Faltas'] = resumo['Qtd_Faltas'].astype(int)
-            resumo['Total_Horas_Atraso'] = resumo['Total_Horas_Atraso'].astype(float)
-            resumo['Tempo_Atraso_Fmt'] = resumo['Total_Horas_Atraso'].apply(decimal_para_hora)
-            
-            # CÁLCULO DE SCORE DE CRITICIDADE
-            # Regra: Score = Faltas + (Horas / 8)
-            resumo['Score'] = resumo['Qtd_Faltas'] + (resumo['Total_Horas_Atraso'] / 8.0)
-            
-            # MAPEAMENTO DO BANCO
-            resumo['NRVINCULOM'] = resumo['NRVINCULOM'].str.split('.').str[0] # Limpa matricula
-            resumo['Procedente'] = resumo['NRVINCULOM'].map(dict_validacoes).fillna(False)
-            resumo['ValidadoPor'] = resumo['NRVINCULOM'].map(dict_usuarios).fillna("-")
-            resumo['UltimaValidacao'] = resumo['NRVINCULOM'].map(dict_snapshots).fillna("-")
+    # KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    total_colab = len(df_mestra)
+    
+    # Validados ou Sem Ocorrências
+    df_ok = df_mestra[(df_mestra['ScoreNum'] == 0) | (df_mestra['Procedente'] == True)]
+    # Críticos Pendentes
+    df_critico = df_mestra[(df_mestra['ScoreNum'] > 0) & (df_mestra['Procedente'] == False)]
+    
+    c1.metric("Total Colaboradores", total_colab)
+    c2.metric("✅ Validados / OK", len(df_ok))
+    c3.metric("⚠️ Pendentes / Críticos", len(df_critico), delta_color="inverse")
+    c4.metric("Índice Risco", f"{df_critico['ScoreNum'].mean():.1f}" if not df_critico.empty else "0.0", help="Média do score dos pendentes")
 
-        else:
-            resumo = pd.DataFrame(columns=['NRVINCULOM', 'Funcionario', 'Supervisor', 'Qtd_Faltas', 'Total_Horas_Atraso', 'Datas', 'Score', 'Procedente'])
+    # BOTÃO ALERTAS
+    st.divider()
+    c_alert, _ = st.columns([1, 4])
+    with c_alert:
+        # Botão normal (cor do tema)
+        if st.button("📢 Central de Alertas", use_container_width=True):
+            dialog_alertas_ponto(df_mestra, mapa_tel, per_cache)
+
+    # GRÁFICO EMPILHADO
+    st.subheader("📊 Status da Equipe por Supervisor")
+    
+    # Agrupa dados para o gráfico
+    grp = df_mestra.groupby(['Supervisor', 'Procedente', 'ScoreNum']).size().reset_index(name='Qtd')
+    
+    # Cria categorias para o gráfico
+    def categorizar(row):
+        if row['ScoreNum'] == 0: return "Excelente/Sem Problemas"
+        if row['Procedente']: return "Validado/Resolvido"
+        return "Crítico Pendente"
+    
+    df_mestra['StatusGrafico'] = df_mestra.apply(categorizar, axis=1)
+    
+    # Agrupamento final
+    df_chart = df_mestra.groupby(['Supervisor', 'StatusGrafico']).size().reset_index(name='Qtd')
+    
+    color_map = {
+        "Excelente/Sem Problemas": "#28a745", # Verde
+        "Validado/Resolvido": "#1E90FF",      # Azul
+        "Crítico Pendente": "#dc3545"         # Vermelho
+    }
+    
+    fig = px.bar(
+        df_chart, 
+        x='Supervisor', 
+        y='Qtd', 
+        color='StatusGrafico',
+        color_discrete_map=color_map,
+        title="Pontos Validados/OK vs Pontos Pendentes",
+        text_auto=True
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("---")
+
+    # TABELA UNIFICADA
+    st.subheader("📋 Painel de Controle Unificado")
+    st.caption("Ordenado por criticidade. Use a caixa 'Ok?' para validar as pendências.")
+
+    # Ordenação: Score Descendente, mas "OK" (0) fica pro final
+    df_show = df_mestra.sort_values(by=['ScoreNum'], ascending=False).copy()
+    
+    with st.form("form_painel"):
+        edited_df = st.data_editor(
+            df_show[[
+                'Procedente', 
+                'ScoreVisual',
+                'Qtd_Faltas', 
+                'Tempo_Atraso_Fmt', 
+                'Funcionario', 
+                'NRVINCULOM', # ID visivel
+                'ValidadoPor', 
+                'UltimaValidacao',
+                'Datas',
+                'Total_Horas_Atraso', # Hidden
+                'ScoreNum' # Hidden
+            ]],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Procedente": st.column_config.CheckboxColumn("Ok?", help="Marque para validar", default=False),
+                "ScoreVisual": st.column_config.TextColumn("Score (0-10)", help="10 = Crítico (Falta). OK = Sem problemas."),
+                "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
+                "Tempo_Atraso_Fmt": st.column_config.TextColumn("Atrasos"),
+                "Funcionario": st.column_config.TextColumn("Colaborador", width="medium"),
+                "NRVINCULOM": st.column_config.TextColumn("Matrícula", disabled=True),
+                "ValidadoPor": st.column_config.TextColumn("Validado Por", disabled=True),
+                "UltimaValidacao": st.column_config.TextColumn("Snapshot", disabled=True),
+                "Datas": st.column_config.TextColumn("Detalhe Datas", width="large"),
+                "Total_Horas_Atraso": None,
+                "ScoreNum": None
+            },
+            key="editor_painel"
+        )
         
-        # SEM OCORRÊNCIAS
-        ids_prob = set(resumo['NRVINCULOM'].unique()) if not resumo.empty else set()
-        df_sem = df_func[~df_func['NRVINCULOM'].str.split('.').str[0].isin(ids_prob)].copy()
-        
-        # KPIs
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Analisado", len(df_func))
-        c2.metric("✅ Ponto Excelente", len(df_sem), delta_color="normal")
-        
-        qtd_com_prob = len(resumo[resumo['Score'] > 0])
-        c3.metric("Com Problemas", qtd_com_prob, delta_color="inverse")
-        
-        # Soma de scores como "Pontos de Atenção"
-        total_score = resumo['Score'].sum() if not resumo.empty else 0
-        c4.metric("Índice Criticidade", f"{total_score:.1f}", help="Soma ponderada: 1 Falta = 1.0, 8h Atraso = 1.0")
-
-        # ALERTAS
-        st.divider()
-        c_alert, _ = st.columns([1, 4])
-        with c_alert:
-            if st.button("📢 Central de Alertas", type="primary", use_container_width=True):
-                dialog_alertas_ponto(resumo, mapa_tel, per_cache)
-
-        # GRÁFICO
-        st.subheader("📊 Ranking por Supervisor (Criticidade)")
-        if not resumo.empty:
-            grp_sup = resumo.groupby('Supervisor')['Score'].sum().reset_index().sort_values('Score', ascending=False)
-            fig = px.bar(grp_sup.head(15), x='Supervisor', y='Score', text_auto='.1f', title="Top 15 Supervisores com Maior Índice de Problemas")
-            fig.update_traces(marker_color='#dc3545')
-            st.plotly_chart(fig, use_container_width=True)
-
-        st.markdown("---")
-
-        # ABAS
-        t1, t2, t3 = st.tabs(["🔥 Ranking de Criticidade (Unificado)", "✅ Ponto Excelente", "📋 Base Completa"])
-        
-        # ABA 1: RANKING UNIFICADO (OTIMIZADO)
-        with t1:
-            st.caption("Ordenado por Score (Faltas primeiro, depois volume de horas). Valide clicando em 'Procedente'.")
+        if st.form_submit_button("💾 Salvar Alterações"):
+            # OTIMIZAÇÃO: Salva apenas o que mudou
+            dict_changes = st.session_state.get("editor_painel", {}).get("edited_rows", {})
             
-            if not resumo.empty:
-                # Ordenação: Procedente (False primeiro) -> Score (Decrescente)
-                df_show = resumo[resumo['Score'] > 0].copy()
-                df_show = df_show.sort_values(by=['Procedente', 'Score'], ascending=[True, False])
-                
-                with st.form("form_validacao_unificada"):
-                    edited_df = st.data_editor(
-                        df_show[[
-                            'Procedente', 
-                            'ValidadoPor', 
-                            'UltimaValidacao',
-                            'Score',
-                            'Qtd_Faltas', 
-                            'Tempo_Atraso_Fmt', 
-                            'NRVINCULOM', 
-                            'Funcionario', 
-                            'Supervisor', 
-                            'Datas',
-                            'Total_Horas_Atraso' # Hidden column for data retention
-                        ]],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "Procedente": st.column_config.CheckboxColumn("Ok?", help="Marque para validar", default=False),
-                            "ValidadoPor": st.column_config.TextColumn("Quem Validou", disabled=True),
-                            "UltimaValidacao": st.column_config.TextColumn("Histórico (Snapshot)", disabled=True, help="Valores salvos na última validação"),
-                            "Score": st.column_config.NumberColumn("Score", format="%.1f ⚠️", help="Faltas + (Horas/8)"),
-                            "Qtd_Faltas": st.column_config.NumberColumn("Faltas", format="%d ❌"),
-                            "Tempo_Atraso_Fmt": st.column_config.TextColumn("Atraso Total", width="small"),
-                            "NRVINCULOM": st.column_config.TextColumn("Matrícula", disabled=True),
-                            "Funcionario": st.column_config.TextColumn("Funcionário", disabled=True),
-                            "Datas": st.column_config.TextColumn("Ocorrências", width="large"),
-                            "Total_Horas_Atraso": None # Hide float
-                        },
-                        key="editor_unificado"
-                    )
-                    
-                    if st.form_submit_button("💾 Salvar Validações"):
-                        # OTIMIZAÇÃO: Identifica apenas linhas alteradas
-                        dict_changes = st.session_state.get("editor_unificado", {}).get("edited_rows", {})
-                        
-                        if not dict_changes:
-                            st.info("Nenhuma alteração detectada para salvar.")
-                        else:
-                            # Filtra o DF para pegar apenas os índices que foram tocados
-                            indices_modificados = list(dict_changes.keys())
-                            df_to_save = edited_df.iloc[indices_modificados].copy()
-                            
-                            conn = st.connection("postgres", type="sql")
-                            usuario_atual = st.session_state.get("name", "Usuario Desconhecido")
-                            
-                            # Salva apenas o subconjunto modificado
-                            save_validacao_batch_snapshot(conn, df_to_save, per_cache, usuario_atual)
-                            
-                            # Atualiza Cache Local (Manual) para feedback imediato
-                            new_proc = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
-                            new_user = {k: usuario_atual for k, v in new_proc.items() if v}
-                            
-                            # Formata snapshot texto para o cache visual
-                            def fmt(row):
-                                f = int(row['Qtd_Faltas'])
-                                h = float(row['Total_Horas_Atraso'])
-                                return f"{f} Faltas | {decimal_para_hora(h)}h"
-                            
-                            new_snap = {row['NRVINCULOM']: fmt(row) for _, row in edited_df.iterrows() if row['Procedente']}
-                            
-                            st.session_state["dados_cache"]["validacoes"].update(new_proc)
-                            st.session_state["dados_cache"]["usuarios_validacao"].update(new_user)
-                            st.session_state["dados_cache"]["snapshots"].update(new_snap)
-                            st.rerun()
+            if not dict_changes:
+                st.info("Nenhuma alteração para salvar.")
             else:
-                st.success("Nenhuma falta ou atraso encontrado!")
+                indices_modificados = list(dict_changes.keys())
+                df_to_save = edited_df.iloc[indices_modificados].copy()
+                
+                conn = st.connection("postgres", type="sql")
+                usuario_atual = st.session_state.get("name", "Usuario Desconhecido")
+                
+                save_validacao_batch_snapshot(conn, df_to_save, per_cache, usuario_atual)
+                
+                # Atualiza Cache Visual
+                new_proc = dict(zip(edited_df['NRVINCULOM'], edited_df['Procedente']))
+                new_user = {k: usuario_atual for k, v in new_proc.items() if v}
+                
+                def fmt(row):
+                    f = int(row['Qtd_Faltas'])
+                    h = float(row['Total_Horas_Atraso'])
+                    return f"{f} Faltas | {decimal_para_hora(h)}h"
+                
+                new_snap = {row['NRVINCULOM']: fmt(row) for _, row in edited_df.iterrows() if row['Procedente']}
+                
+                st.session_state["dados_cache"]["validacoes"].update(new_proc)
+                st.session_state["dados_cache"]["usuarios_validacao"].update(new_user)
+                st.session_state["dados_cache"]["snapshots"].update(new_snap)
+                st.rerun()
 
-        with t2:
-            st.dataframe(df_sem[['NRVINCULOM', 'NMVINCULOM', 'Supervisor']].rename(columns={'NMVINCULOM':'Funcionario'}), use_container_width=True, hide_index=True)
-
-        with t3:
-            csv = resumo.to_csv(index=False, sep=';', encoding='utf-8-sig')
-            st.download_button("📥 Baixar Planilha Completa", csv, f"relatorio_criticidade_{per_cache}.csv", "text/csv")
-            st.dataframe(resumo, use_container_width=True, hide_index=True)
+    # DOWNLOAD
+    csv = df_mestra.to_csv(index=False, sep=';', encoding='utf-8-sig')
+    st.download_button("📥 Baixar Relatório Completo", csv, f"relatorio_diagnostico_{per_cache}.csv", "text/csv")
